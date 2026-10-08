@@ -1,0 +1,39 @@
+{
+  "name": "ecoscan---sustainable-contact-manager",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "check-env": "tsx -e \"console.log(process.env.GEMINI_KEY)\"",
+    "start": "tsx server.ts",
+    "build": "vite build",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@google/genai": "1.38.0",
+    "@notionhq/client": "^5.11.1",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.4.0",
+    "firebase": "^12.10.0",
+    "firebase-admin": "^13.8.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "^1.8.0",
+    "motion": "^12.38.0",
+    "pdfjs-dist": "3.11.174",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "tsx": "^4.21.0",
+    "xlsx": "0.18.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

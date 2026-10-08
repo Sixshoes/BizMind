@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "ImageAsset": {
+      "title": "ImageAsset",
+      "description": "Metadata for uploaded business card images with reference counting for GC.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique ID of the image asset" },
+        "storagePath": { "type": "string", "description": "Cloud Storage path of the image" },
+        "downloadUrl": { "type": "string", "description": "Public download URL" },
+        "sha256": { "type": "string", "description": "Hash of image content for deduplication" },
+        "refCount": { "type": "number", "description": "Number of cards referencing this image" },
+        "status": { "type": "string", "enum": ["active", "pending_delete", "deleted"] },
+        "deleteAfter": { "type": "number", "description": "Timestamp when this image can be hard deleted" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "storagePath", "downloadUrl", "refCount", "status", "createdAt", "updatedAt"]
+    },
+    "BusinessCard": {
+      "title": "BusinessCard",
+      "description": "Business card metadata stored in Notion and mirrored/backup in Firestore if needed.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "title": { "type": "string" },
+        "company": { "type": "string" },
+        "category": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "imageId": { "type": "string", "description": "Link to ImageAsset" },
+        "scannedAt": { "type": "number" }
+      },
+      "required": ["id", "scannedAt"]
+    }
+  },
+  "firestore": {
+    "image_assets/{imageId}": {
+      "schema": "ImageAsset",
+      "description": "Collection of image assets for deduplication and GC."
+    }
+  }
+}

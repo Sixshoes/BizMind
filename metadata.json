@@ -1,0 +1,10 @@
+{
+  "name": "EcoScan - Sustainable Contact Manager",
+  "description": "Professional desktop-style utility for uploading business cards and extracting data in QS Hub format using Gemini AI.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
