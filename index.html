@@ -1,0 +1,142 @@
+
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>BizMind</title>
+    
+    <!-- LINE Browser Redirect Strategy -->
+    <script>
+      if (/Line/i.test(navigator.userAgent)) {
+        if (location.search.indexOf('openExternalBrowser=1') === -1) {
+          var separator = location.search ? '&' : '?';
+          location.href = location.href + separator + 'openExternalBrowser=1';
+        }
+      }
+    </script>
+
+    <!-- 優先載入基礎樣式 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+      
+      :root {
+        --sat: env(safe-area-inset-top);
+        --sab: env(safe-area-inset-bottom);
+      }
+      
+      html, body {
+        height: 100%;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: #f8fafc;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      
+      #root {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      
+      /* 錯誤顯示區 */
+      
+      #error-overlay {
+        position: fixed;
+        inset: 0;
+        background: white;
+        z-index: 10000;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        text-align: center;
+      }
+      
+      .loading-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        gap: 1rem;
+      }
+    </style>
+
+    <!-- 錯誤監聽：第一時間顯示異常 -->
+    <script>
+      window.onerror = function(msg, url, lineNo, columnNo, error) {
+        var msgStr = String(msg || "");
+        var lowercaseMsg = msgStr.toLowerCase();
+        // 忽略 generic "Script error" 或空 URL 拋出的跨網域腳本錯誤（如瀏覽器外掛、廣告攔截器、外部 iframe 等），不代表主程式崩潰
+        if (
+          msgStr === "Script error." ||
+          msgStr === "Script error" ||
+          lowercaseMsg.indexOf("script error") > -1 ||
+          lowercaseMsg.indexOf("extension") > -1 ||
+          !url ||
+          (url.indexOf("http") !== 0) ||
+          url.indexOf("chrome-extension") > -1
+        ) {
+          console.warn("Ignored generic or cross-origin script error:", msg, "URL:", url, "Line:", lineNo);
+          return true; // 必須返回 true 才可以真正阻止瀏覽器拋出這個錯誤，從而不被外層 iframe 監聽套件捕獲
+        }
+        var errorOverlay = document.getElementById('error-overlay');
+        var errorMsg = document.getElementById('error-msg');
+        if (errorOverlay && errorMsg) {
+          errorOverlay.style.display = 'flex';
+          errorMsg.innerText = msg + '\n(Line: ' + lineNo + ')';
+        }
+        return false;
+      };
+
+      // 監聽未處理的 Promise 拒絕，防止未捕獲的跨域拒絕被平台檢測為崩潰
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event.reason;
+        var msg = reason ? (reason.message || String(reason)) : "";
+        var lowercaseMsg = msg.toLowerCase();
+        if (
+          lowercaseMsg.indexOf("script error") > -1 ||
+          lowercaseMsg.indexOf("cors") > -1 ||
+          lowercaseMsg.indexOf("extension") > -1
+        ) {
+          console.warn("Ignored unhandled rejection (cross-origin or extension):", msg);
+          event.preventDefault(); // 阻止拋出
+        }
+      });
+    </script>
+  <script type="module" crossorigin src="/BizMind/assets/index-DSE-iHIe.js"></script>
+</head>
+<body>
+    <!-- 全域錯誤層 -->
+    <div id="error-overlay">
+        <div class="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-4">
+            <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
+        </div>
+        <h2 class="font-bold text-slate-800 mb-2">啟動失敗</h2>
+        <p id="error-msg" class="text-xs text-slate-500 font-mono bg-slate-50 p-3 rounded-lg mb-4 max-w-xs break-all"></p>
+        <button onclick="location.reload()" class="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold shadow-lg shadow-indigo-200">重新載入</button>
+    </div>
+    
+    <div id="root">
+        <div class="loading-container">
+            <div class="relative">
+                <div class="w-12 h-12 border-4 border-indigo-100 rounded-full"></div>
+                <div class="w-12 h-12 border-4 border-indigo-600 rounded-full border-t-transparent animate-spin absolute top-0"></div>
+            </div>
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">BizMind</p>
+        </div>
+    </div>
+
+    <!-- 確保腳本以 module 形式正確載入 -->
+</body>
+</html>
