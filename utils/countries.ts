@@ -497,6 +497,10 @@ export function isTaiwan(raw?: string | null): boolean {
   );
 }
 
+const NORMALIZE_CACHE = new Map<string, string>();
+const BILINGUAL_LABEL_CACHE = new Map<string, string>();
+const MAX_COUNTRY_CACHE_SIZE = 2000;
+
 /**
  * 核心正規化函式：
  * 將任何輸入的國家字串，轉換為標準 197 國名單中的精準名稱。
@@ -507,50 +511,60 @@ export function normalizeCountry(raw?: string | null): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
 
+  const cached = NORMALIZE_CACHE.get(trimmed);
+  if (cached !== undefined) return cached;
+
+  let result = trimmed;
+
   // 1. 優先判斷 Taiwan 各式變體（徹底杜絕好幾個 Taiwan）
   if (isTaiwan(trimmed)) {
-    return 'Taiwan SAR';
-  }
+    result = 'Taiwan SAR';
+  } else {
+    const lower = trimmed.toLowerCase();
 
-  const lower = trimmed.toLowerCase();
-
-  // 2. 精準符合標準名單 (忽略大小寫)
-  if (STANDARD_MAP.has(lower)) {
-    return STANDARD_MAP.get(lower)!;
-  }
-
-  // 3. 別名 / 縮寫 / 中文比對
-  if (COUNTRY_SYNONYMS[lower]) {
-    return COUNTRY_SYNONYMS[lower];
-  }
-
-  // 4. 清理常見標點符號後再比對一次
-  const stripped = lower.replace(/[,.()（）[\]'"]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (STANDARD_MAP.has(stripped)) {
-    return STANDARD_MAP.get(stripped)!;
-  }
-  if (COUNTRY_SYNONYMS[stripped]) {
-    return COUNTRY_SYNONYMS[stripped];
-  }
-
-  // 5. 特殊前綴或包含關鍵字比對
-  if (stripped.includes('hong kong') || stripped.includes('香港')) return 'Hong Kong SAR';
-  if (stripped.includes('macau') || stripped.includes('macao') || stripped.includes('澳門')) return 'Macau SAR';
-  if (stripped.includes('mainland') || stripped.includes('大陸') || stripped === 'china' || stripped.includes('prc')) return 'China Mainland';
-  if (stripped.includes('united states') || stripped.includes('america') || stripped === 'usa') return 'United States';
-  if (stripped.includes('united kingdom') || stripped.includes('great britain') || stripped === 'uk') return 'United Kingdom';
-
-  // 6. 尋找標準名單內的部分包含 (例如 "Kingdom of Saudi Arabia" -> "Saudi Arabia")
-  for (const std of STANDARD_COUNTRIES) {
-    if (std === 'Other') continue;
-    const stdLower = std.toLowerCase();
-    if (stripped.includes(stdLower)) {
-      return std;
+    // 2. 精準符合標準名單 (忽略大小寫)
+    if (STANDARD_MAP.has(lower)) {
+      result = STANDARD_MAP.get(lower)!;
+    } else if (COUNTRY_SYNONYMS[lower]) {
+      // 3. 別名 / 縮寫 / 中文比對
+      result = COUNTRY_SYNONYMS[lower];
+    } else {
+      // 4. 清理常見標點符號後再比對一次
+      const stripped = lower.replace(/[,.()（）[\]'"]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (STANDARD_MAP.has(stripped)) {
+        result = STANDARD_MAP.get(stripped)!;
+      } else if (COUNTRY_SYNONYMS[stripped]) {
+        result = COUNTRY_SYNONYMS[stripped];
+      } else if (stripped.includes('hong kong') || stripped.includes('香港')) {
+        // 5. 特殊前綴或包含關鍵字比對
+        result = 'Hong Kong SAR';
+      } else if (stripped.includes('macau') || stripped.includes('macao') || stripped.includes('澳門')) {
+        result = 'Macau SAR';
+      } else if (stripped.includes('mainland') || stripped.includes('大陸') || stripped === 'china' || stripped.includes('prc')) {
+        result = 'China Mainland';
+      } else if (stripped.includes('united states') || stripped.includes('america') || stripped === 'usa') {
+        result = 'United States';
+      } else if (stripped.includes('united kingdom') || stripped.includes('great britain') || stripped === 'uk') {
+        result = 'United Kingdom';
+      } else {
+        // 6. 尋找標準名單內的部分包含 (例如 "Kingdom of Saudi Arabia" -> "Saudi Arabia")
+        for (const std of STANDARD_COUNTRIES) {
+          if (std === 'Other') continue;
+          const stdLower = std.toLowerCase();
+          if (stripped.includes(stdLower)) {
+            result = std;
+            break;
+          }
+        }
+      }
     }
   }
 
-  // 7. 若完全無法辨識，若首字母為小寫則將開頭轉大寫，否則保留原字
-  return trimmed;
+  if (NORMALIZE_CACHE.size >= MAX_COUNTRY_CACHE_SIZE) {
+    NORMALIZE_CACHE.clear();
+  }
+  NORMALIZE_CACHE.set(trimmed, result);
+  return result;
 }
 
 /**
@@ -765,13 +779,19 @@ export function getCountryBilingualLabel(country?: string | null): string {
   const trimmed = country.trim();
   if (!trimmed || trimmed === "all") return "全部國家";
   if (trimmed === "__empty__") return "未標註國家";
+
+  const cached = BILINGUAL_LABEL_CACHE.get(trimmed);
+  if (cached !== undefined) return cached;
   
   const normalized = normalizeCountry(trimmed);
   const zh = COUNTRY_NAMES_ZH[normalized] || COUNTRY_NAMES_ZH[trimmed] || "";
-  if (zh) {
-    return normalized + " (" + zh + ")";
+  const label = zh ? `${normalized} (${zh})` : (normalized || trimmed);
+
+  if (BILINGUAL_LABEL_CACHE.size >= MAX_COUNTRY_CACHE_SIZE) {
+    BILINGUAL_LABEL_CACHE.clear();
   }
-  return normalized || trimmed;
+  BILINGUAL_LABEL_CACHE.set(trimmed, label);
+  return label;
 }
 
 /**

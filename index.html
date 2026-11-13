@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>BizMind</title>
+    <title>BizMind · 三好永續智慧人脈平台</title>
     
     <!-- LINE Browser Redirect Strategy -->
     <script>
@@ -16,12 +16,13 @@
       }
     </script>
 
-    <!-- 優先載入基礎樣式 -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 預先建立連線並以非阻塞方式載入字型與圖示 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-      
       :root {
         --sat: env(safe-area-inset-top);
         --sab: env(safe-area-inset-bottom);
@@ -34,7 +35,10 @@
         padding: 0;
         overflow: hidden;
         background-color: #f8fafc;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: #0f172a;
+        font-family: 'Inter', 'Noto Sans TC', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
       }
       
       #root {

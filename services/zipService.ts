@@ -1,5 +1,4 @@
 
-import JSZip from 'jszip';
 import { BusinessCardData } from '../types';
 import { createExcelFile } from './excelService';
 import { createVCardFile } from './vcardService';
@@ -59,6 +58,7 @@ const getFormattedName = (card: BusinessCardData): string => {
 };
 
 export const createBatchExportZip = async (cards: BusinessCardData[]): Promise<File> => {
+    const { default: JSZip } = await import('jszip');
     const zip = new JSZip();
     const dateStr = new Date().toISOString().split('T')[0];
     const rootFolder = zip.folder(`EcoScan_Export_${dateStr}`);

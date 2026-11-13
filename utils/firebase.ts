@@ -1,6 +1,3 @@
-import { initializeApp } from "firebase/app";
-import { getStorage, ref, uploadString, getDownloadURL, deleteObject, listAll } from "firebase/storage";
-
 const firebaseConfig = {
   apiKey: "AIzaSyASSEW9be_Yc8VQrP-jsEOdw5DHsyoTIJM",
   authDomain: "ecoscan-sustainable.firebaseapp.com",
@@ -11,8 +8,26 @@ const firebaseConfig = {
   measurementId: "G-W66TPSREVJ"
 };
 
-const app = initializeApp(firebaseConfig);
-export const storage = getStorage(app);
+let storageInstancePromise: Promise<{
+  storage: any;
+  storageMod: typeof import('firebase/storage');
+}> | null = null;
+
+const getClientStorage = async () => {
+  if (!storageInstancePromise) {
+    storageInstancePromise = Promise.all([
+      import('firebase/app'),
+      import('firebase/storage')
+    ]).then(([appMod, storageMod]) => {
+      const app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(firebaseConfig);
+      return {
+        storage: storageMod.getStorage(app),
+        storageMod
+      };
+    });
+  }
+  return storageInstancePromise;
+};
 
 export const uploadImageToFirebase = async (base64Data: string, cardId: string): Promise<string> => {
     try {
@@ -23,10 +38,6 @@ export const uploadImageToFirebase = async (base64Data: string, cardId: string):
         });
         const data = await response.json();
         if (!data.success) throw new Error(data.error);
-        
-        // We might want to return the whole object or just the URL. 
-        // For compatibility, return the URL.
-        // But we should also store the imageId in the card data.
         return data.downloadUrl;
     } catch (error) {
         console.error("Server-side image upload error:", error);
@@ -35,7 +46,7 @@ export const uploadImageToFirebase = async (base64Data: string, cardId: string):
 };
 
 /**
- * New version that returns both id and url (supports base64 or external URL)
+ * Uploads base64 or external URL via server-side Image Service (deduplicated by SHA-256)
  */
 export const uploadImageAsset = async (base64OrUrl: string, cardId: string): Promise<{imageId: string, downloadUrl: string}> => {
     const isBase64 = base64OrUrl.startsWith('data:image');
@@ -55,45 +66,40 @@ export const deleteImageFromFirebase = async (imageUrl: string): Promise<void> =
     if (!imageUrl || !imageUrl.includes('firebasestorage.googleapis.com')) return;
     
     try {
-        // Extract the path from the URL
-        // Example URL: https://firebasestorage.googleapis.com/v0/b/ecoscan-sustainable.firebasestorage.app/o/business_cards%2FcardId.jpg?alt=media...
         const decodedUrl = decodeURIComponent(imageUrl);
         const pathMatch = decodedUrl.match(/\/o\/(.*?)\?alt=media/);
         
         if (pathMatch && pathMatch[1]) {
             const filePath = pathMatch[1];
-            const storageRef = ref(storage, filePath);
-            await deleteObject(storageRef);
+            const { storage, storageMod } = await getClientStorage();
+            const storageRef = storageMod.ref(storage, filePath);
+            await storageMod.deleteObject(storageRef);
             console.log("Successfully deleted image from Firebase:", filePath);
         }
     } catch (error) {
         console.error("Firebase Storage delete error:", error);
-        // Don't throw, just log it so it doesn't break the local deletion flow
     }
 };
 
 export const cleanupOrphanedImages = async (validImageUrls: string[]): Promise<{deleted: number, total: number}> => {
     try {
-        const folderRef = ref(storage, 'business_cards');
-        const result = await listAll(folderRef);
+        const { storage, storageMod } = await getClientStorage();
+        const folderRef = storageMod.ref(storage, 'business_cards');
+        const result = await storageMod.listAll(folderRef);
         let deletedCount = 0;
 
-        // Extract valid file paths from URLs
-        const validFilePaths = validImageUrls.map(url => {
-            if (!url || !url.includes('firebasestorage.googleapis.com')) return null;
-            const decodedUrl = decodeURIComponent(url);
-            const pathMatch = decodedUrl.match(/\/o\/(.*?)\?alt=media/);
-            if (pathMatch && pathMatch[1]) {
-                return pathMatch[1]; // e.g., "business_cards/12345.jpg"
-            }
-            return null;
-        }).filter(Boolean);
+        const validFilePaths = new Set(
+            validImageUrls.map(url => {
+                if (!url || !url.includes('firebasestorage.googleapis.com')) return null;
+                const decodedUrl = decodeURIComponent(url);
+                const pathMatch = decodedUrl.match(/\/o\/(.*?)\?alt=media/);
+                return pathMatch && pathMatch[1] ? pathMatch[1] : null;
+            }).filter(Boolean) as string[]
+        );
 
         for (const itemRef of result.items) {
-            const filePath = itemRef.fullPath; // e.g., "business_cards/12345.jpg"
-
-            if (!validFilePaths.includes(filePath)) {
-                await deleteObject(itemRef);
+            if (!validFilePaths.has(itemRef.fullPath)) {
+                await storageMod.deleteObject(itemRef);
                 deletedCount++;
             }
         }

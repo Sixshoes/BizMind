@@ -1,19 +1,15 @@
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useDeferredValue, Suspense } from 'react';
 import { BusinessCardData, ProcessingTask, ExportMode, SearchPageState } from './types';
-import { filterCards, FilterIntent } from './utils/cardFilters';
-import { normalizeCountry, STANDARD_COUNTRIES, getCountryBilingualLabel, STANDARD_COUNTRY_OPTIONS } from './utils/countries';
+import { filterCards } from './utils/cardFilters';
+import { normalizeCountry, getCountryBilingualLabel, STANDARD_COUNTRY_OPTIONS } from './utils/countries';
 import { detectBusinessCards } from './services/geminiService';
-import CameraScanner from './components/CameraScanner';
 import EditableField from './components/EditableField';
 import PanZoomImage from './components/PanZoomImage';
 import SearchPage from './components/SearchPage';
-import { getCardById, saveCardToDB, deleteCardFromDB, clearAllCardsFromDB } from './services/dbService';
-import { deleteImageFromFirebase, cleanupOrphanedImages } from './utils/firebase';
+import { getCardById, saveCardToDB, saveAllCardsToDB, deleteCardFromDB, deleteCardsFromDB, clearAllCardsFromDB } from './services/dbService';
 import { createVCardFile } from './services/vcardService';
-import * as pdfjsLib from 'pdfjs-dist';
 import { useToast } from './components/ToastProvider';
-import { Check, Trash2, Smartphone, Monitor, Info, Loader2, RefreshCcw, Download } from 'lucide-react';
 
 // New Modular Hooks
 import { useCardState } from './hooks/useCardState';
@@ -22,23 +18,38 @@ import { useImportExport } from './features/import-export/useImportExport';
 import { useScanPipeline } from './features/scan-pipeline/useScanPipeline';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 
-// New Components
-import { TourOverlay, TourStep } from './components/TourOverlay';
-import { QsConfirmationModal } from './components/QsConfirmationModal';
-import { DuplicateManagerModal } from './components/DuplicateManagerModal';
-import { NotionTrashModal } from './components/NotionTrashModal';
+// Components (Lazy-load heavy secondary views & modals)
+import type { TourStep } from './components/TourOverlay';
 import { analyzeDuplicates, mergeDuplicateCards } from './utils/duplicateUtils';
 import { SidebarCardItem } from './components/SidebarCardItem';
 import { CardThumbnail } from './components/CardThumbnail';
 
-// Config PDF.js worker
-const pdfjs = (pdfjsLib as any).default || pdfjsLib;
-if (pdfjs.GlobalWorkerOptions) {
-    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-        'pdfjs-dist/build/pdf.worker.min.js',
-        import.meta.url
-    ).toString();
-}
+const CameraScanner = React.lazy(() => import('./components/CameraScanner'));
+const TourOverlay = React.lazy(() => import('./components/TourOverlay').then(m => ({ default: m.TourOverlay })));
+const QsConfirmationModal = React.lazy(() => import('./components/QsConfirmationModal').then(m => ({ default: m.QsConfirmationModal })));
+const DuplicateManagerModal = React.lazy(() => import('./components/DuplicateManagerModal').then(m => ({ default: m.DuplicateManagerModal })));
+const NotionTrashModal = React.lazy(() => import('./components/NotionTrashModal').then(m => ({ default: m.NotionTrashModal })));
+const WarmGreetingModal = React.lazy(() => import('./components/WarmGreetingModal'));
+const ThreeGoodImpactModal = React.lazy(() => import('./components/ThreeGoodImpactModal'));
+const ChatBox = React.lazy(() => import('./components/ChatBox'));
+
+// Lazy-load PDF.js only when user uploads a PDF document
+let pdfjsPromise: Promise<any> | null = null;
+const loadPdfJs = async () => {
+    if (!pdfjsPromise) {
+        pdfjsPromise = import('pdfjs-dist').then((pdfjsLib) => {
+            const pdfjs = (pdfjsLib as any).default || pdfjsLib;
+            if (pdfjs.GlobalWorkerOptions) {
+                pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+                    'pdfjs-dist/build/pdf.worker.min.js',
+                    import.meta.url
+                ).toString();
+            }
+            return pdfjs;
+        });
+    }
+    return pdfjsPromise;
+};
 
 type ViewMode = 'camera' | 'file' | 'detail' | 'cropper' | 'search';
 
@@ -90,6 +101,11 @@ const App: React.FC = () => {
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
   const [isQsModalOpen, setIsQsModalOpen] = useState(false);
 
+  // --- Three-Good Competition & Greeting Modals State ---
+  const [greetingTargetCard, setGreetingTargetCard] = useState<BusinessCardData | null>(null);
+  const [isImpactModalOpen, setIsImpactModalOpen] = useState(false);
+  const [chatOpenCounter, setChatOpenCounter] = useState(0);
+
   // --- Search / Database Page Persistent State ---
   const [searchPageState, setSearchPageState] = useState<SearchPageState>({
     query: '',
@@ -98,7 +114,8 @@ const App: React.FC = () => {
     filterHasEmail: false,
     filterHasPhone: false,
     filterCategory: 'all',
-    filterCountry: 'all'
+    filterCountry: 'all',
+    displayMode: 'table'
   });
   const [openedFromSearch, setOpenedFromSearch] = useState(false);
 
@@ -148,14 +165,27 @@ const App: React.FC = () => {
 
   // --- Computed Values ---
   const activeTasks = useMemo(() => tasks, [tasks]);
+  const deferredCards = useDeferredValue(cards);
 
   const duplicateAnalysis = useMemo(() => {
-      return analyzeDuplicates(cards);
-  }, [cards]);
+      return analyzeDuplicates(deferredCards);
+  }, [deferredCards]);
 
   const duplicateIds = useMemo(() => {
       return duplicateAnalysis.duplicateCardIds;
   }, [duplicateAnalysis]);
+
+  const sidebarCategoryCounts = useMemo(() => {
+      const counts = { employer: 0, academic: 0, staff: 0, other: 0 };
+      for (let i = 0; i < cards.length; i++) {
+          const cat = cards[i].category;
+          if (cat === 'employer') counts.employer++;
+          else if (cat === 'academic') counts.academic++;
+          else if (cat === 'staff') counts.staff++;
+          else counts.other++;
+      }
+      return counts;
+  }, [cards]);
 
   const sidebarCountries = useMemo(() => {
       const map = new Map<string, number>();
@@ -218,10 +248,14 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     
     const hasVisited = localStorage.getItem('qs_scanner_v1_visited');
+    const skipNotionPrompt = localStorage.getItem('bizmind_skip_notion_prompt') === 'true';
     if (!hasVisited) {
-        setTimeout(() => setTourStepIndex(0), 1000);
-    } else {
-        setTimeout(() => setShowNotionPrompt(true), 500);
+        localStorage.setItem('qs_scanner_v1_visited', 'true');
+        if (!skipNotionPrompt) {
+            setTimeout(() => setShowNotionPrompt(true), 1200);
+        }
+    } else if (!skipNotionPrompt) {
+        setTimeout(() => setShowNotionPrompt(true), 800);
     }
     
     return () => {
@@ -266,13 +300,21 @@ const App: React.FC = () => {
           handleSaveToNotion(); // Use hook version
       }
 
-      const btn = document.getElementById('save-btn');
-      if (btn) {
-          const originalText = btn.innerHTML;
-          btn.innerHTML = '<i class="fa-solid fa-check"></i>';
-          setTimeout(() => btn.innerHTML = originalText, 2000);
-      }
+      addToast({ type: 'success', message: '已儲存名片變更' });
   };
+
+  useEffect(() => {
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        if (formData && isFormDirty) {
+          event.preventDefault();
+          handleSave();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleSaveShortcut);
+    return () => window.removeEventListener('keydown', handleSaveShortcut);
+  }, [formData, isFormDirty]);
 
   const handleQuickCategoryChange = useCallback(async (cardId: string, newCategory: 'employer' | 'academic' | 'staff' | 'other') => {
       const cardToUpdate = cards.find(c => c.id === cardId);
@@ -296,7 +338,7 @@ const App: React.FC = () => {
   }, [cards, formData, addToast, updateCardInList]);
 
   const handleStandardizeAllCountries = useCallback(async () => {
-      let modifiedCount = 0;
+      const changedCards: BusinessCardData[] = [];
       const updatedCards = cards.map(c => {
           const origC = c.country || '';
           const origTrans = c.translations?.country || '';
@@ -306,8 +348,7 @@ const App: React.FC = () => {
 
           const changed = (!origC && normC) || (origC && origC !== normC) || (origTrans && origTrans !== normTrans);
           if (changed) {
-              modifiedCount++;
-              return {
+              const nextCard: BusinessCardData = {
                   ...c,
                   country: normC,
                   translations: c.translations ? {
@@ -315,11 +356,13 @@ const App: React.FC = () => {
                       country: normTrans || normC || c.translations.country
                   } : undefined
               };
+              changedCards.push(nextCard);
+              return nextCard;
           }
           return c;
       });
 
-      if (modifiedCount === 0) {
+      if (changedCards.length === 0) {
           addToast({
               type: 'info',
               message: '目前所有名片的國家名稱均已符合 QS 197 國標準（包含 Taiwan 統一為 Taiwan SAR）！'
@@ -328,17 +371,15 @@ const App: React.FC = () => {
       }
 
       try {
-          for (const card of updatedCards) {
-              await saveCardToDB(card);
-          }
+          await saveAllCardsToDB(changedCards);
           setCards(updatedCards);
           if (formData) {
-              const currentUpdated = updatedCards.find(c => c.id === formData.id);
+              const currentUpdated = changedCards.find(c => c.id === formData.id);
               if (currentUpdated) setFormData(currentUpdated);
           }
           addToast({
               type: 'success',
-              message: `成功將 ${modifiedCount} 筆名片的國家名稱整合為 QS 標準格式 (統一 Taiwan SAR)！`
+              message: `成功將 ${changedCards.length} 筆名片的國家名稱整合為 QS 標準格式 (統一 Taiwan SAR)！`
           });
       } catch (err: any) {
           addToast({
@@ -346,9 +387,9 @@ const App: React.FC = () => {
               message: `標準化失敗：${err.message}`
           });
       }
-  }, [cards, formData, addToast, setCards]);
+  }, [cards, formData, addToast, setCards, setFormData]);
 
-  const handleDeleteCard = async (e: React.MouseEvent, id: string) => {
+  const handleDeleteCard = useCallback(async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     
     if (!window.confirm("確定要移除這筆資料嗎？")) {
@@ -356,11 +397,12 @@ const App: React.FC = () => {
     }
     
     // Find card from local state or DB
-    const cardToDelete = cards.find(c => c.id === id) || (await getCardById(id));
+    const currentCards = cardsRef.current;
+    const cardToDelete = currentCards.find(c => c.id === id) || (await getCardById(id));
     if (!cardToDelete) return;
 
     // Capture state for undo
-    const originalCards = [...cards];
+    const originalCards = [...currentCards];
     const originalFormData = formData;
     const originalSelectedId = selectedCardId;
     const originalViewMode = viewMode;
@@ -411,10 +453,10 @@ const App: React.FC = () => {
         }
       }
     }, 5500);
-  };
+  }, [addToast, cardsRef, deleteFromNotion, formData, selectedCardId, setCards, setFormData, setSelectedCardId, viewMode]);
 
-  const handleClearAll = async () => {
-    if (cards.length === 0) return;
+  const handleClearAll = useCallback(async () => {
+    if (cardsRef.current.length === 0) return;
     
     // Using custom modal or just keeping confirm for "DANGEROUS" destructive actions
     if (!window.confirm("⚠️ 警告：這將會永久刪除所有紀錄！此動作無法復原。")) return;
@@ -427,7 +469,7 @@ const App: React.FC = () => {
       setFormData(null);
       setViewMode('file');
     }
-  };
+  }, [addToast, cardsRef, setCards, setFormData, setSelectedCardId]);
 
   const handleFindDuplicates = () => {
       if (duplicateAnalysis.groups.length === 0) {
@@ -458,8 +500,10 @@ const App: React.FC = () => {
       addToast({ type: 'info', message: `正在智慧整合並清理 ${totalToDelete} 張重複名片...` });
 
       try {
-          let updatedCardsList = [...cards];
+          const mergedPrimaries: BusinessCardData[] = [];
+          const primaryMap = new Map<string, BusinessCardData>();
           const allDeletedIds = new Set<string>();
+          const notionDeletions: BusinessCardData[] = [];
 
           for (const group of analysis.groups) {
               const keepCardId = keepMap.get(group.id) || group.primaryCardId;
@@ -468,29 +512,43 @@ const App: React.FC = () => {
 
               if (redundantCards.length === 0) continue;
 
-              // 1. Merge complementary info into primaryCard
               const mergedPrimary = mergeDuplicateCards(primaryCard, redundantCards);
-              await saveCardToDB(mergedPrimary);
+              mergedPrimaries.push(mergedPrimary);
+              primaryMap.set(mergedPrimary.id, mergedPrimary);
 
-              // Update primary in list
-              updatedCardsList = updatedCardsList.map(c => c.id === mergedPrimary.id ? mergedPrimary : c);
-
-              // 2. Delete redundants
               for (const red of redundantCards) {
                   allDeletedIds.add(red.id);
-                  try {
-                      if (red.syncStatus === 'notion') {
-                          await deleteFromNotion(red.id, red.imageId, `${red.lastName || ''}${red.firstName || ''}`);
-                      }
-                      await deleteCardFromDB(red.id);
-                  } catch (err) {
-                      console.error(`Error deleting redundant card ${red.id}:`, err);
+                  if (red.syncStatus === 'notion') {
+                      notionDeletions.push(red);
                   }
               }
           }
 
+          await saveAllCardsToDB(mergedPrimaries);
+          await deleteCardsFromDB(Array.from(allDeletedIds));
+
+          // Delete from Notion with controlled concurrency (3)
+          let idx = 0;
+          const deleteWorker = async () => {
+              while (true) {
+                  const i = idx++;
+                  if (i >= notionDeletions.length) break;
+                  const red = notionDeletions[i];
+                  try {
+                      await deleteFromNotion(red.id, red.imageId, `${red.lastName || ''}${red.firstName || ''}`);
+                  } catch (err) {
+                      console.error(`Error deleting redundant card ${red.id}:`, err);
+                  }
+              }
+          };
+          if (notionDeletions.length > 0) {
+              await Promise.all(Array.from({ length: Math.min(3, notionDeletions.length) }, () => deleteWorker()));
+          }
+
           // Finalize state
-          const finalizedCards = updatedCardsList.filter(c => !allDeletedIds.has(c.id));
+          const finalizedCards = cards
+              .filter(c => !allDeletedIds.has(c.id))
+              .map(c => primaryMap.get(c.id) || c);
           setCards(finalizedCards);
 
           if (selectedCardId && allDeletedIds.has(selectedCardId)) {
@@ -536,12 +594,20 @@ const App: React.FC = () => {
 
       setIsDeduplicating(true);
       const idSet = new Set(cardIds);
-      for (const cardId of cardIds) {
-          const cardToDelete = cards.find(c => c.id === cardId) || (await getCardById(cardId));
-          if (cardToDelete?.syncStatus === 'notion') {
-              await deleteFromNotion(cardId, cardToDelete?.imageId);
+      const notionTargets = cards.filter(c => idSet.has(c.id) && c.syncStatus === 'notion');
+      await deleteCardsFromDB(cardIds);
+
+      let idx = 0;
+      const worker = async () => {
+          while (true) {
+              const i = idx++;
+              if (i >= notionTargets.length) break;
+              const cardToDelete = notionTargets[i];
+              await deleteFromNotion(cardToDelete.id, cardToDelete.imageId);
           }
-          await deleteCardFromDB(cardId);
+      };
+      if (notionTargets.length > 0) {
+          await Promise.all(Array.from({ length: Math.min(3, notionTargets.length) }, () => worker()));
       }
 
       setCards(prev => prev.filter(c => !idSet.has(c.id)));
@@ -553,8 +619,8 @@ const App: React.FC = () => {
       addToast({ type: 'success', message: `✅ 已成功刪除 ${cardIds.length} 張重複名片！` });
   };
 
-  const handleRemoveNoImageCards = async () => {
-      const noImageCards = cards.filter(c => !c.imageUrl || c.imageUrl.trim() === '');
+  const handleRemoveNoImageCards = useCallback(async () => {
+      const noImageCards = cardsRef.current.filter(c => !c.imageUrl || c.imageUrl.trim() === '');
       if (noImageCards.length === 0) {
           addToast({ type: 'success', message: '🎉 恭喜！所有名片都包含圖片，沒有發現無圖片名片。' });
           return;
@@ -562,10 +628,11 @@ const App: React.FC = () => {
       if (!window.confirm(`⚠️ 確定要刪除這 ${noImageCards.length} 張沒有圖片的名片嗎？\n此動作會同步從本地及 Notion（若已同步）移除。`)) return;
 
       const idsToRemove = noImageCards.map(c => c.id);
+      const removeSet = new Set(idsToRemove);
       
       // Update state optimistically
-      setCards(prev => prev.filter(c => !idsToRemove.includes(c.id)));
-      if (selectedCardId && idsToRemove.includes(selectedCardId)) {
+      setCards(prev => prev.filter(c => !removeSet.has(c.id)));
+      if (selectedCardId && removeSet.has(selectedCardId)) {
           setSelectedCardId(null);
           setFormData(null);
           setViewMode('file');
@@ -573,21 +640,28 @@ const App: React.FC = () => {
 
       addToast({ type: 'info', message: `正在移除 ${noImageCards.length} 張無圖片名片...` });
 
-      // Run deletion in background/sequence
-      let deletedCount = 0;
-      for (const card of noImageCards) {
-          try {
-              await deleteFromNotion(card.id, card.imageId, `${card.lastName || ''}${card.firstName || ''}`);
-              await deleteCardFromDB(card.id);
-              deletedCount++;
-          } catch (e) {
-              console.error(`Failed to delete card ${card.id}:`, e);
+      await deleteCardsFromDB(idsToRemove);
+      const notionCards = noImageCards.filter(c => c.syncStatus === 'notion');
+      let idx = 0;
+      const worker = async () => {
+          while (true) {
+              const i = idx++;
+              if (i >= notionCards.length) break;
+              const card = notionCards[i];
+              try {
+                  await deleteFromNotion(card.id, card.imageId, `${card.lastName || ''}${card.firstName || ''}`);
+              } catch (e) {
+                  console.error(`Failed to delete card ${card.id}:`, e);
+              }
           }
+      };
+      if (notionCards.length > 0) {
+          await Promise.all(Array.from({ length: Math.min(3, notionCards.length) }, () => worker()));
       }
 
-      addToast({ type: 'success', message: `✅ 已成功移除 ${deletedCount} 張沒有圖片的名片！` });
+      addToast({ type: 'success', message: `✅ 已成功移除 ${noImageCards.length} 張沒有圖片的名片！` });
       setShowSettingsMenu(false);
-  };
+  }, [addToast, cardsRef, deleteFromNotion, selectedCardId, setCards, setFormData, setSelectedCardId]);
 
   const handleCleanupFirebase = async () => {
       if (!confirm("這將會掃描並清理所有「引用數為 0」且已過保留期的圖片。\n\n確定要執行嗎？")) return;
@@ -658,30 +732,31 @@ const App: React.FC = () => {
   }, [cards, formData, setCards, setFormData, addToast]);
 
   const handleStandardizeSelectedCountries = useCallback(async () => {
-    let count = 0;
+    const changedCards: BusinessCardData[] = [];
     const updatedCards = [...cards];
     for (let i = 0; i < updatedCards.length; i++) {
       const c = updatedCards[i];
       if (selectedCardIds.has(c.id)) {
         const norm = normalizeCountry(c.country || c.translations?.country || '');
         if (norm && norm !== c.country) {
-          const updated = { ...c, country: norm };
-          if (updated.translations?.country) {
-            updated.translations.country = norm;
-          }
-          await saveCardToDB(updated);
+          const updated: BusinessCardData = {
+            ...c,
+            country: norm,
+            translations: c.translations ? { ...c.translations, country: norm } : undefined
+          };
+          changedCards.push(updated);
           updatedCards[i] = updated;
-          count++;
         }
       }
     }
-    if (count > 0) {
+    if (changedCards.length > 0) {
+      await saveAllCardsToDB(changedCards);
       setCards(updatedCards);
       if (formData && selectedCardIds.has(formData.id)) {
-        const currentUpdated = updatedCards.find(c => c.id === formData.id);
+        const currentUpdated = changedCards.find(c => c.id === formData.id);
         if (currentUpdated) setFormData(currentUpdated);
       }
-      addToast({ type: 'success', message: `已將 ${count} 筆已勾選名片的國家名稱標準化為 QS 規範格式！` });
+      addToast({ type: 'success', message: `已將 ${changedCards.length} 筆已勾選名片的國家名稱標準化為 QS 規範格式！` });
     } else {
       addToast({ type: 'info', message: "已選名片的國家名稱均已符合標準" });
     }
@@ -779,6 +854,7 @@ const App: React.FC = () => {
         reader.onload = async (ev) => {
             const typedarray = new Uint8Array(ev.target?.result as ArrayBuffer);
             try {
+                const pdfjs = await loadPdfJs();
                 const pdf = await pdfjs.getDocument(typedarray).promise;
                 setPdfDoc(pdf); setCurrentPdfPage(1); await renderPdfPage(pdf, 1);
                 setViewMode('cropper');
@@ -805,6 +881,9 @@ const App: React.FC = () => {
 
     // Batch Processing via Hook
     processBatchFiles(files);
+    if (viewMode === 'search') {
+        setViewMode('file');
+    }
     if (fileInputRef.current) fileInputRef.current.value = '';
     setShowMobileUploadHint(false);
   };
@@ -1095,6 +1174,47 @@ const App: React.FC = () => {
       setShowNotionPrompt(true);
   };
 
+  const handleSidebarSelectCard = useCallback((id: string) => {
+      selectCard(id);
+      setViewMode('detail');
+  }, [selectCard]);
+
+  const handleOpenQsModal = useCallback(() => setIsQsModalOpen(true), []);
+  const handleOpenNotionTrash = useCallback(() => setShowNotionTrashModal(true), []);
+  const handleOpenDuplicateModal = useCallback(() => setShowDuplicateManager(true), []);
+  const handleAddNewCardView = useCallback(() => {
+      if (isMobile) {
+          setShowMobileUploadHint(true);
+      } else {
+          fileInputRef.current?.click();
+      }
+  }, [isMobile]);
+  const handleOpenWorkspace = useCallback(() => {
+      setOpenedFromSearch(false);
+      setViewMode(selectedCardId ? 'detail' : 'file');
+  }, [selectedCardId]);
+  const handleScanCameraView = useCallback(() => setViewMode('camera'), []);
+  const handleTriggerAutoDeduplicate = useCallback(() => { handleAutoDeduplicate(); }, [cards]);
+  const handleOpenWarmGreeting = useCallback((card: BusinessCardData) => {
+      setGreetingTargetCard(card);
+  }, []);
+  const handleOpenImpactModal = useCallback(() => {
+      setIsImpactModalOpen(true);
+  }, []);
+  const handleLoadDemoCards = useCallback(async () => {
+      const { createDemoCards } = await import('./utils/demoCards');
+      const demoList = createDemoCards();
+      const existingIds = new Set(cardsRef.current.map(c => c.id));
+      const newOnes = demoList.filter(d => !existingIds.has(d.id));
+      if (newOnes.length === 0) {
+          addToast({ type: 'info', message: '示範名片已在目前資料庫中' });
+          return;
+      }
+      await saveAllCardsToDB(newOnes);
+      setCards(prev => [...newOnes, ...prev]);
+      addToast({ type: 'success', message: `已載入 ${newOnes.length} 筆三好永續國際交流示範名片` });
+  }, [addToast, setCards]);
+
   const handleSearchSelectCard = useCallback((id: string) => {
       const c = cardsRef.current.find(x => x.id === id);
       if (c) setActiveCategory(c.category);
@@ -1151,12 +1271,14 @@ const App: React.FC = () => {
 
       {/* Onboarding Tour */}
       {tourStepIndex >= 0 && (
-          <TourOverlay 
-            stepIndex={tourStepIndex} 
-            steps={tourSteps} 
-            onNext={handleTourNext} 
-            onSkip={handleTourSkip} 
-          />
+          <Suspense fallback={null}>
+              <TourOverlay 
+                stepIndex={tourStepIndex} 
+                steps={tourSteps} 
+                onNext={handleTourNext} 
+                onSkip={handleTourSkip} 
+              />
+          </Suspense>
       )}
 
       {/* Mobile Upload Hint Modal */}
@@ -1207,42 +1329,72 @@ const App: React.FC = () => {
       <aside className={`${(isMobile ? viewMode === 'file' : (viewMode === 'file' || viewMode === 'detail')) ? 'flex' : 'hidden'} w-full md:w-[320px] lg:w-[380px] flex-row bg-white border-r border-slate-200 shadow-xl lg:shadow-none z-10 shrink-0`}>
          
          {/* 1. Left Task Rail (Queue & Quick Action) */}
-         <div className="w-[64px] bg-slate-50 border-r border-slate-200 flex flex-col items-center py-4 gap-3 shrink-0 z-20">
-             {/* Add Button - Updated Handler */}
-             <button id="btn-upload" onClick={handleAddClick} className="w-10 h-10 rounded-xl bg-indigo-600 text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition-all flex items-center justify-center" title="上傳名片">
+         <div className="w-[64px] bg-slate-50/90 border-r border-slate-200/80 flex flex-col items-center py-4 gap-2.5 shrink-0 z-20">
+             {/* Add Button */}
+             <button id="btn-upload" onClick={handleAddClick} className="w-10 h-10 rounded-xl bg-indigo-600 text-white shadow-sm hover:bg-indigo-700 active:scale-95 transition-all flex items-center justify-center cursor-pointer" title="上傳名片或 PDF">
                  <i className="fa-solid fa-plus text-sm"></i>
              </button>
-             
-             {/* Divider */}
-             <div className="w-6 h-px bg-slate-200 my-1"></div>
+
+             {/* Impact & AI Disclosure Quick Button */}
+             <button
+                 type="button"
+                 onClick={() => setIsImpactModalOpen(true)}
+                 className="w-10 h-10 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200/70 transition-all flex items-center justify-center cursor-pointer"
+                 title="三好四給永續影響力與 AI 透明揭露"
+             >
+                 <i className="fa-solid fa-seedling text-sm"></i>
+             </button>
+
+             {/* Queue Pause/Resume Toggle when tasks exist */}
+             {activeTasks.some(t => t.status === 'pending' || t.status === 'processing') && (
+                 <button
+                     type="button"
+                     onClick={() => setIsQueuePaused(p => !p)}
+                     className={`w-9 h-7 rounded-lg text-[10px] font-bold border transition-colors flex items-center justify-center cursor-pointer ${
+                         isQueuePaused
+                             ? 'bg-amber-100 text-amber-800 border-amber-300'
+                             : 'bg-white text-slate-500 hover:bg-slate-100 border-slate-200'
+                     }`}
+                     title={isQueuePaused ? '繼續處理掃描佇列' : '暫停掃描佇列'}
+                 >
+                     <i className={`fa-solid ${isQueuePaused ? 'fa-play' : 'fa-pause'}`}></i>
+                 </button>
+             )}
+
+             <div className="w-6 h-px bg-slate-200 my-0.5"></div>
 
              {/* Task List */}
              <div className="flex-1 w-full overflow-y-auto custom-scrollbar flex flex-col items-center gap-2 px-1 pb-4">
                  {activeTasks.map(task => (
                      <div 
                          key={task.id} 
-                         className={`relative w-10 h-10 rounded-lg bg-white border border-slate-200 shadow-sm shrink-0 overflow-hidden group transition-all ${task.status === 'error' ? 'cursor-pointer hover:ring-2 hover:ring-red-400' : 'cursor-help'}`}
+                         title={
+                             task.status === 'error'
+                                 ? `失敗 (${task.fileName})：${task.error || '點擊重試'}`
+                                 : `${task.fileName} (${task.status === 'processing' ? 'AI 辨識中' : task.status === 'completed' ? '已完成' : '排隊中'})`
+                         }
+                         className={`relative w-10 h-10 rounded-lg bg-white border border-slate-200 shadow-2xs shrink-0 overflow-hidden group transition-all ${task.status === 'error' ? 'cursor-pointer hover:ring-2 hover:ring-rose-400' : 'cursor-default'}`}
                          onClick={() => task.status === 'error' && handleRetryTask(task.id)}
                      >
                          {task.previewUrl ? (
-                             <img src={task.previewUrl} className="w-full h-full object-contain bg-slate-100" />
+                             <img src={task.previewUrl} alt="" className="w-full h-full object-contain bg-slate-100" />
                          ) : (
-                             <div className="w-full h-full flex items-center justify-center text-slate-300"><i className="fa-solid fa-image"></i></div>
+                             <div className="w-full h-full flex items-center justify-center text-slate-300"><i className="fa-regular fa-image"></i></div>
                          )}
                          {task.status === 'processing' && (
-                             <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                             <div className="absolute inset-0 bg-slate-900/45 flex items-center justify-center">
                                  <i className="fa-solid fa-circle-notch fa-spin text-white text-xs"></i>
                              </div>
                          )}
                          {task.status === 'completed' && (
-                             <div className="absolute inset-0 bg-emerald-500/90 flex items-center justify-center animate-fadeIn">
-                                 <i className="fa-solid fa-check text-white text-sm"></i>
+                             <div className="absolute inset-0 bg-emerald-600/90 flex items-center justify-center animate-fadeIn">
+                                 <i className="fa-solid fa-check text-white text-xs"></i>
                              </div>
                          )}
                          {task.status === 'error' && (
-                             <div className="absolute inset-0 border-2 border-red-500 rounded-lg flex flex-col items-center justify-center bg-red-50/80 backdrop-blur-[1px] transition-colors hover:bg-red-100/80">
-                                 <i className="fa-solid fa-rotate-right text-red-600 text-sm mb-0.5"></i>
-                                 <span className="text-[6px] font-black text-red-600 leading-none">RETRY</span>
+                             <div className="absolute inset-0 border-2 border-rose-500 rounded-lg flex flex-col items-center justify-center bg-rose-50/90 backdrop-blur-[1px] transition-colors hover:bg-rose-100">
+                                 <i className="fa-solid fa-rotate-right text-rose-600 text-xs mb-0.5"></i>
+                                 <span className="text-[7px] font-bold text-rose-700 leading-none">重試</span>
                              </div>
                          )}
                      </div>
@@ -1252,20 +1404,20 @@ const App: React.FC = () => {
 
          {/* 2. Right Sidebar Content */}
          <div className="flex-1 flex flex-col min-w-0 bg-white relative">
-            <div className="p-4 border-b border-slate-100 bg-white sticky top-0 z-20" style={{paddingTop: isMobile ? 'calc(1rem + var(--sat))' : '1.5rem'}}>
-                <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg">
-                            <i className="fa-solid fa-leaf text-lg"></i>
+            <div className="p-4 border-b border-slate-100 bg-white sticky top-0 z-20" style={{paddingTop: isMobile ? 'calc(1rem + var(--sat))' : '1.25rem'}}>
+                <div className="flex items-center justify-between mb-3.5">
+                    <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 bg-gradient-to-br from-indigo-600 to-emerald-600 rounded-xl flex items-center justify-center text-white shadow-xs">
+                            <i className="fa-solid fa-seedling text-sm"></i>
                         </div>
                         <div>
-                            <h1 className="text-lg font-black text-slate-900 tracking-tight leading-none">EcoScan 🌱✨</h1>
-                            <div className="flex items-center gap-2 mt-0.5">
-                                <span className="text-[10px] font-bold text-slate-400 tracking-widest">Sustainable Contact Manager 🌍</span>
+                            <h1 className="text-base font-bold text-slate-900 tracking-tight leading-none">BizMind 永續人脈</h1>
+                            <div className="flex items-center gap-2 mt-1">
+                                <span className="text-[10px] font-medium text-slate-400">三好四給 · 智慧掃描工作區</span>
                                 {bgTaskCount > 0 && (
-                                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 bg-indigo-50 rounded-md border border-indigo-100 animate-pulse">
-                                        <i className="fa-solid fa-wand-magic-sparkles text-indigo-500 text-[9px]"></i>
-                                        <span className="text-[9px] font-bold text-indigo-600">AI 補全簡介中 ({bgTaskCount})</span>
+                                    <div className="flex items-center gap-1 px-1.5 py-0.2 bg-indigo-50 rounded border border-indigo-100 animate-pulse">
+                                        <i className="fa-solid fa-circle-notch fa-spin text-indigo-500 text-[8px]"></i>
+                                        <span className="text-[9px] font-semibold text-indigo-600">AI ({bgTaskCount})</span>
                                     </div>
                                 )}
                             </div>
@@ -1274,24 +1426,22 @@ const App: React.FC = () => {
                     <div className="flex items-center gap-1">
                         {/* Export Menu */}
                         <div className="relative" ref={exportMenuRef}>
-                            <button id="btn-export" onClick={() => setShowExportMenu(!showExportMenu)} className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${showExportMenu ? 'bg-indigo-100 text-indigo-600' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`} title="匯出選項">
-                                <i className="fa-solid fa-file-export"></i>
+                            <button id="btn-export" onClick={() => setShowExportMenu(!showExportMenu)} className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${showExportMenu ? 'bg-indigo-50 text-indigo-600' : 'text-slate-400 hover:text-slate-700 hover:bg-slate-100'}`} title="匯出選項">
+                                <i className="fa-solid fa-arrow-up-from-bracket text-xs"></i>
                             </button>
                             {showExportMenu && (
-                                <div className="absolute right-0 top-full mt-2 w-64 bg-white rounded-xl shadow-xl border border-slate-100 py-2 z-50 animate-fadeIn origin-top-right">
-                                    {/* Group 0: QS Selection Action */}
+                                <div className="absolute right-0 top-full mt-1.5 w-60 bg-white rounded-xl shadow-xl border border-slate-200/90 py-1.5 z-50 animate-fadeIn origin-top-right">
                                     {selectedCardIds.size > 0 && (
                                         <>
-                                            <div className="px-4 py-1.5 text-[10px] font-bold text-indigo-700 uppercase tracking-widest bg-indigo-50/80 flex items-center justify-between">
-                                                <span>已勾選 QS 名單 ({selectedCardIds.size} 位)</span>
-                                                <span className="text-[9px] bg-indigo-200 text-indigo-800 px-1.5 py-0.5 rounded-full font-bold">自訂選取</span>
+                                            <div className="px-3.5 py-1.5 text-[10px] font-bold text-indigo-700 uppercase tracking-wider bg-indigo-50/70 flex items-center justify-between">
+                                                <span>已勾選名單 ({selectedCardIds.size})</span>
                                             </div>
                                             <button 
                                                 onClick={() => {
                                                     setShowExportMenu(false);
                                                     setIsQsModalOpen(true);
                                                 }} 
-                                                className="w-full text-left px-4 py-2.5 text-sm text-indigo-700 bg-indigo-50/40 hover:bg-indigo-100 transition-colors flex items-center gap-2 font-black"
+                                                className="w-full text-left px-3.5 py-2 text-xs text-indigo-700 hover:bg-indigo-50 transition-colors flex items-center gap-2 font-semibold cursor-pointer"
                                             >
                                                 <i className="fa-solid fa-clipboard-check w-4 text-center text-indigo-600"></i> 審查名單並匯出 ({selectedCardIds.size})
                                             </button>
@@ -1301,7 +1451,7 @@ const App: React.FC = () => {
                                                     const selected = cards.filter(c => selectedCardIds.has(c.id));
                                                     handleExport('selected_qs', selected);
                                                 }} 
-                                                className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-emerald-600 transition-colors flex items-center gap-2"
+                                                className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer"
                                             >
                                                 <i className="fa-solid fa-file-excel w-4 text-center text-emerald-600"></i> 快速匯出勾選 QS Excel
                                             </button>
@@ -1309,45 +1459,35 @@ const App: React.FC = () => {
                                         </>
                                     )}
 
-                                    {/* Group 1: QS Format */}
-                                    <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50/50">QS 格式匯出</div>
-                                    <button onClick={() => handleExport('employer')} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-briefcase w-4 text-center text-slate-400"></i> QS Employer
+                                    <div className="px-3.5 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">QS 標準格式</div>
+                                    <button onClick={() => handleExport('employer')} className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer">
+                                        <span className="w-2 h-2 rounded-full bg-blue-500 ml-1"></span> QS Employer
                                     </button>
-                                    <button onClick={() => handleExport('academic')} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-graduation-cap w-4 text-center text-slate-400"></i> QS Academic
+                                    <button onClick={() => handleExport('academic')} className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer">
+                                        <span className="w-2 h-2 rounded-full bg-amber-500 ml-1"></span> QS Academic
                                     </button>
-                                    <button onClick={() => handleExport('staff')} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-user-tag w-4 text-center text-slate-400"></i> QS Staff
-                                    </button>
-                                    
-                                    {/* Group 2: Details */}
-                                    <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50/50 mt-1">名片詳情匯出</div>
-                                    <button onClick={() => handleExport('all_clean')} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-language w-4 text-center text-slate-400"></i> 所有名片原文 (Excel)
-                                    </button>
-                                    <button onClick={() => handleExport('all_original')} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-database w-4 text-center text-slate-400"></i> 所有資料含註解 (Excel)
+                                    <button onClick={() => handleExport('staff')} className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer">
+                                        <span className="w-2 h-2 rounded-full bg-emerald-500 ml-1"></span> QS Staff
                                     </button>
                                     
-                                    {/* Group 3: vCard */}
-                                    <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50/50 mt-1">電子名片</div>
-                                    <button onClick={() => handleExport('vcard')} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors flex items-center gap-2">
+                                    <div className="h-px bg-slate-100 my-1"></div>
+                                    <div className="px-3.5 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">名片詳情與備份</div>
+                                    <button onClick={() => handleExport('all_clean')} className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer">
+                                        <i className="fa-solid fa-table w-4 text-center text-slate-400"></i> 所有名片清單 (Excel)
+                                    </button>
+                                    <button onClick={() => handleExport('all_original')} className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer">
+                                        <i className="fa-solid fa-database w-4 text-center text-slate-400"></i> 含翻譯與註解 (Excel)
+                                    </button>
+                                    <button onClick={() => handleExport('vcard')} className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer">
                                         <i className="fa-regular fa-address-card w-4 text-center text-slate-400"></i> vCard (.vcf)
                                     </button>
-                                    
-                                    {/* Group 4: Batch Export */}
-                                    <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50/50 mt-1">批量匯出</div>
-                                    <button onClick={() => handleExport('zip')} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-file-zipper w-4 text-center text-slate-400"></i> 批量匯出 (ZIP)
+                                    <button onClick={() => handleExport('zip')} className="w-full text-left px-3.5 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer">
+                                        <i className="fa-solid fa-file-zipper w-4 text-center text-slate-400"></i> 整合匯出 (.zip)
                                     </button>
-
-                                    {/* Group 5: Backup */}
-                                    <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50/50 mt-1">備份</div>
-                                    <button onClick={() => handleExport('full_backup')} className="w-full text-left px-4 py-2 text-sm text-indigo-700 bg-indigo-50/50 hover:bg-indigo-100 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-cloud-arrow-down w-4 text-center"></i> 完整備份 (JSON - 含圖片)
+                                    <button onClick={() => handleExport('full_backup')} className="w-full text-left px-3.5 py-2 text-xs text-indigo-700 hover:bg-indigo-50 transition-colors flex items-center gap-2 font-medium cursor-pointer">
+                                        <i className="fa-solid fa-cloud-arrow-down w-4 text-center"></i> 完整備份 (JSON)
                                     </button>
-                                    <button onClick={() => handleExport('csv')} className="w-full text-left px-4 py-2 text-sm text-indigo-700 bg-indigo-50/50 hover:bg-indigo-100 transition-colors flex items-center gap-2">
+                                    <button onClick={() => handleExport('csv')} className="w-full text-left px-3.5 py-2 text-xs text-indigo-700 hover:bg-indigo-50 transition-colors flex items-center gap-2 font-medium cursor-pointer">
                                         <i className="fa-solid fa-file-csv w-4 text-center"></i> 完整備份 (CSV)
                                     </button>
                                 </div>
@@ -1356,115 +1496,112 @@ const App: React.FC = () => {
 
                         {/* Settings Menu */}
                         <div className="relative" ref={settingsMenuRef}>
-                            <button id="btn-settings" onClick={() => setShowSettingsMenu(!showSettingsMenu)} className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${showSettingsMenu ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-50'}`} title="設定">
-                                <i className="fa-solid fa-gear"></i>
+                            <button id="btn-settings" onClick={() => setShowSettingsMenu(!showSettingsMenu)} className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors cursor-pointer ${showSettingsMenu ? 'bg-slate-100 text-slate-700' : 'text-slate-400 hover:text-slate-700 hover:bg-slate-100'}`} title="系統設定">
+                                <i className="fa-solid fa-sliders text-xs"></i>
                             </button>
                             {showSettingsMenu && (
-                                <div className="absolute right-0 top-full mt-2 w-56 bg-white rounded-xl shadow-xl border border-slate-100 py-2 z-50 animate-fadeIn origin-top-right">
-                                    <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50/50">系統設定</div>
+                                <div className="absolute right-0 top-full mt-1.5 w-60 bg-white rounded-xl shadow-xl border border-slate-200/90 py-1.5 z-50 animate-fadeIn origin-top-right">
+                                    <div className="px-3.5 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">雲端與資料管理</div>
                                     
-                                    {/* Sync All to Notion Button */}
-                                    <button onClick={handleSyncAllToNotion} disabled={isSyncingAll} className="w-full text-left px-4 py-3 text-sm text-indigo-700 bg-indigo-50/50 hover:bg-indigo-100 transition-colors flex items-center gap-2 font-bold">
+                                    <button onClick={handleSyncAllToNotion} disabled={isSyncingAll} className="w-full text-left px-3.5 py-2.5 text-xs text-indigo-700 hover:bg-indigo-50 transition-colors flex items-center gap-2.5 font-semibold cursor-pointer">
                                         {isSyncingAll ? <i className="fa-solid fa-circle-notch fa-spin w-4 text-center"></i> : <i className="fa-solid fa-cloud-arrow-up w-4 text-center text-indigo-500"></i>}
-                                        一鍵新增到 Notion 🚀
+                                        一鍵同步至 Notion
                                     </button>
 
-                                    {/* Notion Load Button */}
-                                    <button onClick={handleLoadFromNotion} disabled={isNotionLoading} className="w-full text-left px-4 py-3 text-sm text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2">
+                                    <button onClick={handleLoadFromNotion} disabled={isNotionLoading} className="w-full text-left px-3.5 py-2.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2.5 cursor-pointer">
                                         {isNotionLoading ? <i className="fa-solid fa-circle-notch fa-spin w-4 text-center"></i> : <i className="fa-solid fa-cloud-arrow-down w-4 text-center text-slate-400"></i>}
-                                        載入 Notion 資料 📥
+                                        從 Notion 載入資料
                                     </button>
 
-                                    {/* Notion Trash Scan & Restore Button */}
-                                    <button onClick={() => { setShowSettingsMenu(false); setShowNotionTrashModal(true); }} className="w-full text-left px-4 py-3 text-sm text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 transition-colors flex items-center gap-2 font-medium">
-                                        <i className="fa-solid fa-box-archive w-4 text-center text-indigo-500"></i>
-                                        檢查並還原 Notion 封存名片 ♻️
+                                    <button onClick={() => { setShowSettingsMenu(false); setShowNotionTrashModal(true); }} className="w-full text-left px-3.5 py-2.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2.5 cursor-pointer">
+                                        <i className="fa-solid fa-box-archive w-4 text-center text-slate-400"></i>
+                                        還原 Notion 封存名片
                                     </button>
 
-                                    {/* Find Duplicates Button */}
-                                    <button onClick={handleFindDuplicates} className="w-full text-left px-4 py-3 text-sm text-slate-700 hover:bg-slate-50 transition-colors flex items-center justify-between">
-                                        <span className="flex items-center gap-2">
-                                            <i className="fa-solid fa-clone w-4 text-center text-slate-400"></i>
-                                            <span>尋找並清理重複名片</span>
+                                    <button onClick={() => { setShowSettingsMenu(false); handleLoadDemoCards(); }} className="w-full text-left px-3.5 py-2.5 text-xs text-emerald-700 hover:bg-emerald-50 transition-colors flex items-center gap-2.5 font-medium cursor-pointer">
+                                        <i className="fa-solid fa-seedling w-4 text-center text-emerald-600"></i>
+                                        載入三好永續示範名片
+                                    </button>
+
+                                    <button onClick={handleFindDuplicates} className="w-full text-left px-3.5 py-2.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center justify-between cursor-pointer">
+                                        <span className="flex items-center gap-2.5">
+                                            <i className="fa-regular fa-copy w-4 text-center text-slate-400"></i>
+                                            <span>檢查重複名片</span>
                                         </span>
                                         {duplicateAnalysis.totalDuplicateCount > 0 && (
-                                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800">
+                                            <span className="text-[10px] font-bold px-1.5 py-0.2 rounded-full bg-amber-100 text-amber-800">
                                                 {duplicateAnalysis.totalDuplicateCount}
                                             </span>
                                         )}
                                     </button>
 
-                                    {/* Remove No Image Cards Button */}
-                                    <button onClick={handleRemoveNoImageCards} className="w-full text-left px-4 py-3 text-sm text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2">
-                                        <i className="fa-solid fa-image-slash w-4 text-center text-slate-400"></i> 移除無圖片名片
+                                    <button onClick={handleRemoveNoImageCards} className="w-full text-left px-3.5 py-2.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2.5 cursor-pointer">
+                                        <i className="fa-regular fa-image w-4 text-center text-slate-400"></i> 移除無圖片項目
                                     </button>
 
-                                    {/* Cleanup Firebase Button Removed */}
-
-                                    <button onClick={() => { setShowSettingsMenu(false); handleClearAll(); }} className="w-full text-left px-4 py-3 text-sm text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2 font-bold">
-                                        <i className="fa-solid fa-trash-can w-4 text-center"></i> 清理本地緩存
+                                    <div className="h-px bg-slate-100 my-1"></div>
+                                    <button onClick={() => { setShowSettingsMenu(false); handleClearAll(); }} className="w-full text-left px-3.5 py-2.5 text-xs text-rose-600 hover:bg-rose-50 transition-colors flex items-center gap-2.5 font-semibold cursor-pointer">
+                                        <i className="fa-regular fa-trash-can w-4 text-center"></i> 清空本機快取
                                     </button>
                                 </div>
                             )}
                         </div>
-
                     </div>
                 </div>
 
                 {isMobile && (
-                    <div className="mb-4">
-                        <button onClick={() => setViewMode('camera')} className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-50 text-indigo-700 rounded-xl font-bold text-xs uppercase tracking-wide hover:bg-indigo-100 transition-colors">
-                            <i className="fa-solid fa-camera"></i> 拍照
+                    <div className="mb-3">
+                        <button onClick={() => setViewMode('camera')} className="w-full flex items-center justify-center gap-2 py-2.5 bg-indigo-50 text-indigo-700 rounded-xl font-semibold text-xs hover:bg-indigo-100 transition-colors">
+                            <i className="fa-solid fa-camera"></i> 開啟相機拍攝名片
                         </button>
                     </div>
                 )}
                 
                 {/* Search / Filter Area */}
-                <div className="mb-3 space-y-2">
-                    <button id="btn-search" onClick={() => setViewMode('search')} className="w-full flex items-center gap-3 bg-slate-100 rounded-lg px-3 py-2.5 text-xs text-slate-400 hover:bg-slate-200 transition-colors group">
-                        <i className="fa-solid fa-search text-slate-400 group-hover:text-indigo-600"></i>
-                        <span className="font-medium group-hover:text-indigo-600">開啟全螢幕搜尋庫 (支援AI摘要)...</span>
-                        <span className="ml-auto bg-white px-1.5 py-0.5 rounded text-[10px] font-bold text-slate-400 border border-slate-200">⌘K</span>
+                <div className="mb-2.5 space-y-1.5">
+                    <button id="btn-search" onClick={() => setViewMode('search')} className="w-full flex items-center gap-2.5 bg-slate-50 border border-slate-200/80 rounded-xl px-3 py-2 text-xs text-slate-500 hover:bg-slate-100 hover:border-slate-300 transition-all group cursor-pointer">
+                        <i className="fa-solid fa-magnifying-glass text-slate-400 group-hover:text-indigo-600"></i>
+                        <span className="font-medium group-hover:text-slate-800">切換至全螢幕資料庫檢視...</span>
+                        <span className="ml-auto bg-white px-1.5 py-0.5 rounded text-[10px] font-semibold text-slate-400 border border-slate-200">⌘K</span>
                     </button>
                     
-                    {/* Updated Navigation: All vs QS Classification vs Country */}
                     <button 
                         onClick={() => { setActiveCategory('all'); setActiveCountry('all'); setShowQsFilters(false); setShowCountryFilters(false); }} 
-                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${activeCategory === 'all' && activeCountry === 'all' && !showQsFilters && !showCountryFilters ? 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200' : 'text-slate-500 hover:bg-slate-100'}`}
+                        className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${activeCategory === 'all' && activeCountry === 'all' && !showQsFilters && !showCountryFilters ? 'bg-indigo-50/80 text-indigo-700' : 'text-slate-600 hover:bg-slate-50'}`}
                     >
-                        <i className="fa-solid fa-inbox w-4 text-center"></i>
-                        全部名片 📂
-                        <span className="ml-auto text-[10px] bg-slate-200 px-1.5 rounded-full text-slate-500">{cards.length}</span>
+                        <i className="fa-solid fa-inbox w-4 text-center text-slate-400"></i>
+                        <span>全部名片</span>
+                        <span className="ml-auto text-[10px] bg-slate-100 px-1.5 py-0.2 rounded-md text-slate-600 tabular-nums">{cards.length}</span>
                     </button>
 
                     <div className="flex flex-col">
                         <button 
                             onClick={() => setShowQsFilters(!showQsFilters)} 
-                            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${showQsFilters || activeCategory !== 'all' ? 'text-indigo-700 bg-slate-50' : 'text-slate-500 hover:bg-slate-100'}`}
+                            className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${showQsFilters || activeCategory !== 'all' ? 'text-indigo-700 bg-slate-50' : 'text-slate-600 hover:bg-slate-50'}`}
                         >
-                            <i className="fa-solid fa-layer-group w-4 text-center"></i>
-                            QS 分類 🏷️
-                            <i className={`fa-solid fa-chevron-down ml-auto text-[10px] transition-transform ${showQsFilters ? 'rotate-180' : ''}`}></i>
+                            <i className="fa-solid fa-layer-group w-4 text-center text-slate-400"></i>
+                            <span>QS 角色分類</span>
+                            <i className={`fa-solid fa-chevron-down ml-auto text-[9px] text-slate-400 transition-transform ${showQsFilters ? 'rotate-180' : ''}`}></i>
                         </button>
 
                         {showQsFilters && (
-                            <div className="flex flex-col gap-1 mt-1 pl-4 border-l-2 border-slate-100 ml-3 animate-fadeIn">
+                            <div className="flex flex-col gap-1 mt-1 pl-3 border-l border-slate-200 ml-4 animate-fadeIn">
                                 {(['employer', 'academic', 'staff', 'other'] as const).map(cat => {
-                                    const emojiMap: Record<string, string> = {
-                                        employer: '🏢',
-                                        academic: '🎓',
-                                        staff: '🤝',
-                                        other: '🌟'
+                                    const labelMap: Record<string, string> = {
+                                        employer: 'QS 雇主 (Employer)',
+                                        academic: 'QS 學者 (Academic)',
+                                        staff: 'QS 職員 (Staff)',
+                                        other: '非 QS (General)'
                                     };
                                     return (
                                         <button 
                                             key={cat} 
                                             onClick={() => setActiveCategory(cat)} 
-                                            className={`text-left px-3 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all flex items-center justify-between ${activeCategory === cat ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-indigo-600 hover:bg-slate-50'}`}
+                                            className={`text-left px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center justify-between cursor-pointer ${activeCategory === cat ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                                         >
-                                            <span>{emojiMap[cat]} {cat === 'other' ? 'Not QS' : cat}</span>
-                                            <span className={`text-[9px] px-1.5 rounded-full ${activeCategory === cat ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-500'}`}>
-                                                {cards.filter(c => c.category === cat).length}
+                                            <span>{labelMap[cat]}</span>
+                                            <span className={`text-[10px] px-1.5 rounded-md tabular-nums ${activeCategory === cat ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                                {sidebarCategoryCounts[cat]}
                                             </span>
                                         </button>
                                     );
@@ -1473,31 +1610,30 @@ const App: React.FC = () => {
                         )}
                     </div>
 
-                    {/* Country Filter Navigation */}
                     {sidebarCountries.length > 0 && (
                         <div className="flex flex-col">
                             <button 
                                 onClick={() => setShowCountryFilters(!showCountryFilters)} 
-                                className={`w-full text-left px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${showCountryFilters || activeCountry !== 'all' ? 'text-indigo-700 bg-slate-50' : 'text-slate-500 hover:bg-slate-100'}`}
+                                className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${showCountryFilters || activeCountry !== 'all' ? 'text-indigo-700 bg-slate-50' : 'text-slate-600 hover:bg-slate-50'}`}
                             >
-                                <i className="fa-solid fa-earth-americas w-4 text-center"></i>
-                                <span>國家篩選 🌍</span>
+                                <i className="fa-solid fa-globe w-4 text-center text-slate-400"></i>
+                                <span>國家與地區</span>
                                 {activeCountry !== 'all' && (
-                                    <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold truncate max-w-[80px]">
+                                    <span className="text-[10px] bg-indigo-50 text-indigo-700 px-1.5 py-0.2 rounded font-semibold truncate max-w-[90px]">
                                         {getCountryBilingualLabel(activeCountry)}
                                     </span>
                                 )}
-                                <i className={`fa-solid fa-chevron-down ml-auto text-[10px] transition-transform ${showCountryFilters ? 'rotate-180' : ''}`}></i>
+                                <i className={`fa-solid fa-chevron-down ml-auto text-[9px] text-slate-400 transition-transform ${showCountryFilters ? 'rotate-180' : ''}`}></i>
                             </button>
 
                             {showCountryFilters && (
-                                <div className="flex flex-col gap-1 mt-1 pl-4 border-l-2 border-slate-100 ml-3 animate-fadeIn max-h-48 overflow-y-auto custom-scrollbar">
+                                <div className="flex flex-col gap-1 mt-1 pl-3 border-l border-slate-200 ml-4 animate-fadeIn max-h-44 overflow-y-auto custom-scrollbar">
                                     <button
                                         onClick={() => setActiveCountry('all')}
-                                        className={`text-left px-3 py-1.5 rounded-md text-[10px] font-bold transition-all flex items-center justify-between ${activeCountry === 'all' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-indigo-600 hover:bg-slate-50'}`}
+                                        className={`text-left px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center justify-between cursor-pointer ${activeCountry === 'all' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                                     >
                                         <span>全部國家</span>
-                                        <span className={`text-[9px] px-1.5 rounded-full ${activeCountry === 'all' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-500'}`}>
+                                        <span className={`text-[10px] px-1.5 rounded-md ${activeCountry === 'all' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
                                             {cards.length}
                                         </span>
                                     </button>
@@ -1505,10 +1641,10 @@ const App: React.FC = () => {
                                         <button 
                                             key={ctryName} 
                                             onClick={() => setActiveCountry(ctryName)} 
-                                            className={`text-left px-3 py-1.5 rounded-md text-[10px] font-bold transition-all flex items-center justify-between ${activeCountry === ctryName ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-indigo-600 hover:bg-slate-50'}`}
+                                            className={`text-left px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center justify-between cursor-pointer ${activeCountry === ctryName ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                                         >
-                                            <span className="truncate mr-2">📍 {getCountryBilingualLabel(ctryName)}</span>
-                                            <span className={`text-[9px] px-1.5 rounded-full shrink-0 ${activeCountry === ctryName ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-500'}`}>
+                                            <span className="truncate mr-2">{getCountryBilingualLabel(ctryName)}</span>
+                                            <span className={`text-[10px] px-1.5 rounded-md shrink-0 ${activeCountry === ctryName ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
                                                 {count}
                                             </span>
                                         </button>
@@ -1520,12 +1656,11 @@ const App: React.FC = () => {
                 </div>
 
                 {/* QS Batch Selection Bar */}
-                <div className="mt-2 pt-2 border-t border-slate-100 flex flex-col gap-1.5 bg-slate-50/90 p-2 rounded-xl border border-slate-200/60">
+                <div className="mt-2 pt-2 border-t border-slate-100 flex flex-col gap-1.5 bg-slate-50/70 p-2.5 rounded-xl border border-slate-200/60">
                     <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1 text-[11px] font-bold text-slate-700">
-                            <i className="fa-solid fa-check-square text-indigo-600"></i>
-                            <span>QS 勾選名單</span>
-                            <span className="bg-indigo-100 text-indigo-800 text-[10px] px-1.5 py-0.2 rounded-full font-black">
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700">
+                            <span>QS 匯出選取</span>
+                            <span className="bg-indigo-100 text-indigo-800 text-[10px] px-1.5 py-0.2 rounded-md font-bold tabular-nums">
                                 {selectedCardIds.size}
                             </span>
                         </div>
@@ -1533,9 +1668,9 @@ const App: React.FC = () => {
                             <button
                                 type="button"
                                 onClick={handleDeselectAll}
-                                className="text-[10px] text-slate-400 hover:text-rose-600 font-bold transition-colors cursor-pointer"
+                                className="text-[10px] text-slate-400 hover:text-rose-600 font-semibold transition-colors cursor-pointer"
                             >
-                                清除全部
+                                清除
                             </button>
                         )}
                     </div>
@@ -1544,34 +1679,30 @@ const App: React.FC = () => {
                         <button
                             type="button"
                             onClick={() => handleSelectCategory('all')}
-                            className="px-2 py-0.5 bg-white hover:bg-indigo-50 hover:text-indigo-600 text-slate-600 text-[10px] font-bold rounded border border-slate-200 shadow-2xs transition-all cursor-pointer"
-                            title="選取全部 QS 聯絡人 (雇主/學者/職員)"
+                            className="px-2 py-0.5 bg-white hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 text-[10px] font-semibold rounded-md border border-slate-200/80 transition-all cursor-pointer"
                         >
                             全選 QS
                         </button>
                         <button
                             type="button"
                             onClick={() => handleSelectCategory('employer')}
-                            className="px-1.5 py-0.5 bg-white hover:bg-blue-50 text-slate-600 text-[10px] font-bold rounded border border-slate-200 transition-all cursor-pointer"
-                            title="選取全部 QS 雇主"
+                            className="px-2 py-0.5 bg-white hover:bg-blue-50 text-slate-600 text-[10px] font-semibold rounded-md border border-slate-200/80 transition-all cursor-pointer"
                         >
-                            🏢 雇主
+                            雇主
                         </button>
                         <button
                             type="button"
                             onClick={() => handleSelectCategory('academic')}
-                            className="px-1.5 py-0.5 bg-white hover:bg-amber-50 text-slate-600 text-[10px] font-bold rounded border border-slate-200 transition-all cursor-pointer"
-                            title="選取全部 QS 學者"
+                            className="px-2 py-0.5 bg-white hover:bg-amber-50 text-slate-600 text-[10px] font-semibold rounded-md border border-slate-200/80 transition-all cursor-pointer"
                         >
-                            🎓 學者
+                            學者
                         </button>
                         <button
                             type="button"
                             onClick={() => handleSelectCategory('staff')}
-                            className="px-1.5 py-0.5 bg-white hover:bg-emerald-50 text-slate-600 text-[10px] font-bold rounded border border-slate-200 transition-all cursor-pointer"
-                            title="選取全部 QS 職員"
+                            className="px-2 py-0.5 bg-white hover:bg-emerald-50 text-slate-600 text-[10px] font-semibold rounded-md border border-slate-200/80 transition-all cursor-pointer"
                         >
-                            🤝 職員
+                            職員
                         </button>
                     </div>
 
@@ -1579,17 +1710,17 @@ const App: React.FC = () => {
                         <button
                             type="button"
                             onClick={() => setIsQsModalOpen(true)}
-                            className="w-full mt-0.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-black flex items-center justify-center gap-1.5 shadow-sm shadow-indigo-200 transition-all cursor-pointer"
+                            className="w-full mt-0.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shadow-2xs transition-all cursor-pointer"
                         >
                             <i className="fa-solid fa-clipboard-check text-xs"></i>
-                            <span>確認名單並匯出 ({selectedCardIds.size})</span>
+                            <span>審查名單與匯出 ({selectedCardIds.size})</span>
                         </button>
                     )}
                 </div>
             </div>
 
             <div 
-                className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-2 bg-slate-50/50"
+                className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-1.5 bg-slate-50/40"
                 onScroll={(e) => {
                     const target = e.currentTarget;
                     if (target.scrollTop + target.clientHeight >= target.scrollHeight - 200) {
@@ -1600,18 +1731,13 @@ const App: React.FC = () => {
                 }}
             >
                 {visibleCards.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-48 text-slate-300">
-                        {searchQuery ? (
-                             <>
-                                <span className="text-4xl mb-2">🔍👻</span>
-                                <span className="text-xs font-medium">找不到符合的資料耶～</span>
-                             </>
-                        ) : (
-                             <>
-                                <span className="text-4xl mb-2">📦✨</span>
-                                <span className="text-xs font-medium">這裡空空的，趕快來新增吧！</span>
-                             </>
-                        )}
+                    <div className="flex flex-col items-center justify-center h-48 text-slate-400 text-center px-4">
+                        <div className="w-10 h-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-slate-300 mb-2.5">
+                            <i className={`fa-solid ${searchQuery ? 'fa-magnifying-glass' : 'fa-inbox'}`}></i>
+                        </div>
+                        <span className="text-xs font-medium text-slate-500">
+                            {searchQuery ? '找不到符合條件的聯絡人' : '目前尚無名片資料'}
+                        </span>
                     </div>
                 ) : (
                     <>
@@ -1622,7 +1748,7 @@ const App: React.FC = () => {
                                 isSelected={selectedCardId === c.id}
                                 isQsChecked={selectedCardIds.has(c.id)}
                                 isDuplicate={duplicateIds.has(c.id)}
-                                onSelect={(id) => { selectCard(id); setViewMode('detail'); }}
+                                onSelect={handleSidebarSelectCard}
                                 onToggleQs={handleToggleCardSelect}
                                 onDelete={handleDeleteCard}
                             />
@@ -1631,9 +1757,9 @@ const App: React.FC = () => {
                             <button
                                 type="button"
                                 onClick={() => setSidebarDisplayLimit(prev => Math.min(visibleCards.length, prev + 100))}
-                                className="w-full py-2.5 bg-white hover:bg-slate-100 text-slate-500 rounded-xl text-xs font-bold border border-slate-200 shadow-2xs transition-colors cursor-pointer"
+                                className="w-full py-2 bg-white hover:bg-slate-50 text-slate-600 rounded-xl text-xs font-semibold border border-slate-200 shadow-2xs transition-colors cursor-pointer"
                             >
-                                載入更多名片 (剩餘 {visibleCards.length - sidebarDisplayLimit} 筆)...
+                                載入更多 ({visibleCards.length - sidebarDisplayLimit} 筆)
                             </button>
                         )}
                     </>
@@ -1643,7 +1769,7 @@ const App: React.FC = () => {
       </aside>
 
       {/* --- MAIN CONTENT AREA --- */}
-      <main className={`flex-1 flex flex-col min-w-0 relative bg-slate-100/50 ${isMobile && viewMode === 'file' ? 'hidden' : 'flex'}`}>
+      <main className={`flex-1 flex flex-col min-w-0 relative bg-[#f8fafc] ${isMobile && viewMode === 'file' ? 'hidden' : 'flex'}`}>
          
          {/* Render Active View */}
          {viewMode === 'search' ? (
@@ -1652,27 +1778,31 @@ const App: React.FC = () => {
                 onSelectCard={handleSearchSelectCard} 
                 onDeleteCard={handleDeleteCard}
                 onStandardizeCountries={handleStandardizeAllCountries}
-                onBack={cards.length > 0 && selectedCardId ? handleSearchBack : undefined} 
+                onBack={cards.length > 0 && selectedCardId ? handleSearchBack : undefined}
+                onOpenWorkspace={handleOpenWorkspace}
                 selectedCardIds={selectedCardIds}
                 onToggleCard={handleToggleCardSelect}
                 onSelectBatch={handleSelectBatch}
                 onDeselectAll={handleDeselectAll}
-                onOpenQsModal={() => setIsQsModalOpen(true)}
+                onOpenQsModal={handleOpenQsModal}
                 searchState={searchPageState}
                 onSearchStateChange={setSearchPageState}
                 onUpdateCardCategory={handleQuickCategoryChange}
-                onAddNewCard={() => setViewMode('file')}
-                onScanCamera={() => setViewMode('camera')}
+                onAddNewCard={handleAddNewCardView}
+                onScanCamera={handleScanCameraView}
                 onExport={handleExport}
                 onSyncAllToNotion={handleSyncAllToNotion}
                 isSyncingAll={isSyncingAll}
                 onLoadFromNotion={handleLoadFromNotion}
                 isNotionLoading={isNotionLoading}
-                onOpenNotionTrash={() => setShowNotionTrashModal(true)}
-                onOpenDuplicateModal={() => setShowDuplicateManager(true)}
+                onOpenNotionTrash={handleOpenNotionTrash}
+                onOpenDuplicateModal={handleOpenDuplicateModal}
                 onRemoveNoImageCards={handleRemoveNoImageCards}
                 onClearAll={handleClearAll}
-                onAutoDeduplicate={() => handleAutoDeduplicate()}
+                onAutoDeduplicate={handleTriggerAutoDeduplicate}
+                onOpenWarmGreeting={handleOpenWarmGreeting}
+                onOpenImpactModal={handleOpenImpactModal}
+                onLoadDemoCards={handleLoadDemoCards}
                 duplicateGroupCount={duplicateAnalysis.groups.length}
                 redundantDuplicateCount={duplicateAnalysis.totalDuplicateCount}
                 duplicateCardIds={duplicateIds}
@@ -1682,8 +1812,8 @@ const App: React.FC = () => {
          ) : (
              <>
                  {/* Top Toolbar (Unified for Mobile/Desktop) */}
-                 <div className="h-16 border-b border-slate-200 bg-white/80 backdrop-blur px-4 md:px-6 flex items-center justify-between shrink-0">
-                     <div className="flex items-center gap-2.5 md:gap-4 overflow-hidden">
+                 <div className="h-14 border-b border-slate-200/80 bg-white/90 backdrop-blur px-4 md:px-6 flex items-center justify-between shrink-0">
+                     <div className="flex items-center gap-2.5 md:gap-3.5 overflow-hidden">
                          {isMobile ? (
                              <button 
                                  onClick={() => {
@@ -1693,88 +1823,103 @@ const App: React.FC = () => {
                                          setViewMode('file');
                                      }
                                  }} 
-                                 className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-100 text-slate-600 shrink-0 hover:bg-slate-200 cursor-pointer"
+                                 className="w-8 h-8 flex items-center justify-center rounded-lg bg-slate-100 text-slate-600 shrink-0 hover:bg-slate-200 cursor-pointer"
                                  title={openedFromSearch ? "返回資料庫搜尋" : "返回列表"}
                              >
-                                 <i className="fa-solid fa-arrow-left"></i>
+                                 <i className="fa-solid fa-arrow-left text-xs"></i>
                              </button>
                          ) : (
-                             openedFromSearch ? (
-                                 <button 
-                                     type="button"
-                                     onClick={() => setViewMode('search')}
-                                     className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border border-indigo-200 shrink-0 cursor-pointer shadow-2xs group"
-                                     title="返回名片資料庫搜尋（已保留所有搜尋關鍵字與篩選條件）"
-                                 >
-                                     <i className="fa-solid fa-arrow-left transition-transform group-hover:-translate-x-0.5"></i>
-                                     <span>返回資料庫</span>
-                                     {(searchPageState.query || searchPageState.filterCategory !== 'all' || searchPageState.filterCountry !== 'all' || searchPageState.filterHasEmail || searchPageState.filterHasPhone) && (
-                                         <span className="w-2 h-2 rounded-full bg-indigo-600 animate-pulse" title="已保留篩選條件"></span>
-                                     )}
-                                 </button>
-                             ) : (
-                                 <button 
-                                     type="button"
-                                     onClick={() => setViewMode('search')}
-                                     className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-bold transition-all hidden sm:flex items-center gap-1.5 shrink-0 cursor-pointer"
-                                     title="開啟全螢幕資料庫"
-                                 >
-                                     <i className="fa-solid fa-database text-slate-500 text-xs"></i>
-                                     <span>資料庫</span>
-                                 </button>
-                             )
+                             <button 
+                                 type="button"
+                                 onClick={() => setViewMode('search')}
+                                 className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 border border-slate-200/90 shrink-0 cursor-pointer shadow-2xs group"
+                                 title="返回名片資料庫總覽（保留搜尋與篩選條件）"
+                             >
+                                 <i className="fa-solid fa-arrow-left text-[11px] text-slate-400 transition-transform group-hover:-translate-x-0.5"></i>
+                                 <span>資料庫總覽</span>
+                                 {(searchPageState.query || searchPageState.filterCategory !== 'all' || searchPageState.filterCountry !== 'all' || searchPageState.filterHasEmail || searchPageState.filterHasPhone) && (
+                                     <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" title="已保留篩選條件"></span>
+                                 )}
+                             </button>
                          )}
                          {formData ? (
                              <div className="flex flex-col min-w-0">
-                                <h2 className="text-base font-black text-slate-900 leading-tight truncate">
-                                    {(formData.firstName || formData.lastName) ? `${formData.firstName} ${formData.lastName}` : (formData.company || '未知名片')}
+                                <h2 className="text-sm md:text-base font-bold text-slate-900 leading-tight truncate">
+                                    {(formData.firstName || formData.lastName) ? `${formData.lastName || ''} ${formData.firstName || ''}`.trim() : (formData.company || '未命名名片')}
                                 </h2>
-                                <span className="text-xs text-slate-500 font-medium truncate uppercase tracking-wider">{formData.company}</span>
+                                {formData.company && (
+                                    <span className="text-[11px] text-slate-500 truncate">{formData.company}</span>
+                                )}
                              </div>
                          ) : (
-                            <div className="text-sm font-bold text-slate-400 flex items-center gap-2">
-                                <span className="text-lg">👀</span> 尚未選擇名片
+                            <div className="text-xs font-semibold text-slate-500">
+                                掃描與匯入工作區
                             </div>
                          )}
                      </div>
                      
                      {/* Right Action Buttons */}
-                     <div className="flex items-center gap-2 md:gap-3 shrink-0">
+                     <div className="flex items-center gap-2 shrink-0">
                          {formData && (
                              <>
+                                {/* AI Warm Greeting Button */}
+                                <button
+                                    type="button"
+                                    onClick={() => setGreetingTargetCard(formData)}
+                                    className="h-8 px-3 rounded-lg text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 transition-all flex items-center gap-1.5 cursor-pointer"
+                                    title="AI 說好話・撰寫溫暖問候信草稿"
+                                >
+                                    <i className="fa-regular fa-paper-plane text-[11px]"></i>
+                                    <span className="hidden lg:inline">AI 溫暖問候</span>
+                                </button>
+
                                 {/* QS Selection Toggle */}
                                 <button
                                     type="button"
                                     onClick={() => handleToggleCardSelect(formData.id)}
-                                    className={`h-9 px-3 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                                    className={`h-8 px-3 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                                         selectedCardIds.has(formData.id)
-                                            ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-500'
-                                            : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200'
+                                            ? 'bg-indigo-600 text-white shadow-2xs'
+                                            : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-200/90'
                                     }`}
                                     title={selectedCardIds.has(formData.id) ? '從 QS 匯出名單中取消勾選' : '勾選此名片至 QS 匯出名單'}
                                 >
-                                    <i className={`fa-solid ${selectedCardIds.has(formData.id) ? 'fa-square-check' : 'fa-square'}`}></i>
-                                    <span className="hidden sm:inline">{selectedCardIds.has(formData.id) ? '已勾選 QS' : '勾選 QS'}</span>
+                                    <i className={`fa-solid ${selectedCardIds.has(formData.id) ? 'fa-square-check' : 'fa-square text-slate-300'}`}></i>
+                                    <span className="hidden sm:inline">{selectedCardIds.has(formData.id) ? '已選 QS' : '選入 QS'}</span>
                                 </button>
+
                                 {/* Save Button */}
-                                <button id="save-btn" onClick={handleSave} disabled={!isFormDirty} className={`h-9 px-3 md:px-5 rounded-lg text-xs font-bold uppercase tracking-wide transition-all flex items-center justify-center gap-2 ${isFormDirty ? 'bg-indigo-600 text-white shadow-md shadow-indigo-300 hover:bg-indigo-700' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>
-                                   {isMobile ? <i className="fa-solid fa-floppy-disk text-sm"></i> : <><i className="fa-solid fa-floppy-disk"></i> 儲存</>}
+                                <button
+                                    id="save-btn"
+                                    type="button"
+                                    onClick={handleSave}
+                                    disabled={!isFormDirty}
+                                    title={isFormDirty ? '儲存變更 (Ctrl+S)' : '目前已是最新儲存狀態'}
+                                    className={`h-8 px-3.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
+                                        isFormDirty
+                                            ? 'bg-indigo-600 text-white shadow-xs hover:bg-indigo-700 cursor-pointer'
+                                            : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                    }`}
+                                >
+                                   <i className="fa-regular fa-floppy-disk text-xs"></i>
+                                   {!isMobile && <span>儲存</span>}
+                                   {isFormDirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-300"></span>}
                                 </button>
                                 
-                                <div className="w-px h-6 bg-slate-300 hidden md:block"></div>
+                                <div className="w-px h-5 bg-slate-200 hidden md:block"></div>
                                 
                                 {/* Share/Export Button */}
                                 {isMobile ? (
                                      <div className="relative" ref={shareMenuRef}>
-                                         <button onClick={() => setShowShareMenu(!showShareMenu)} className={`h-9 px-3 rounded-lg text-xs font-bold uppercase tracking-wide transition-colors flex items-center justify-center ${showShareMenu ? 'bg-indigo-100 text-indigo-600' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}>
-                                             <i className="fa-solid fa-share-nodes text-sm"></i>
+                                         <button onClick={() => setShowShareMenu(!showShareMenu)} className={`h-8 px-2.5 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center ${showShareMenu ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-600'}`}>
+                                             <i className="fa-solid fa-share-nodes text-xs"></i>
                                          </button>
                                          {showShareMenu && (
-                                            <div className="absolute right-0 top-full mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 py-2 z-50 animate-fadeIn origin-top-right">
-                                                <button onClick={() => { handleShare(true); setShowShareMenu(false); }} className="w-full text-left px-4 py-3 text-sm text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2">
+                                            <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-xl shadow-xl border border-slate-200/90 py-1.5 z-50 animate-fadeIn origin-top-right">
+                                                <button onClick={() => { handleShare(true); setShowShareMenu(false); }} className="w-full text-left px-3.5 py-2.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2">
                                                     <i className="fa-solid fa-wand-magic-sparkles w-4 text-center text-indigo-500"></i> 分享 (含 AI 簡介)
                                                 </button>
-                                                <button onClick={() => { handleShare(false); setShowShareMenu(false); }} className="w-full text-left px-4 py-3 text-sm text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2">
+                                                <button onClick={() => { handleShare(false); setShowShareMenu(false); }} className="w-full text-left px-3.5 py-2.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-2">
                                                     <i className="fa-regular fa-id-card w-4 text-center text-slate-400"></i> 分享 (僅資料)
                                                 </button>
                                             </div>
@@ -1782,41 +1927,40 @@ const App: React.FC = () => {
                                      </div>
                                 ) : (
                                      <>
-                                         <button onClick={() => handleExport('single')} disabled={isExporting} className="h-9 px-4 bg-emerald-50 text-emerald-600 rounded-lg text-xs font-bold uppercase tracking-wide hover:bg-emerald-100 transition-colors flex items-center gap-2">
-                                            {isExporting ? <i className="fa-solid fa-circle-notch fa-spin"></i> : <i className="fa-solid fa-file-excel"></i>} 匯出此筆
+                                         <button onClick={() => handleExport('single')} disabled={isExporting} className="h-8 px-3 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/90 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer">
+                                            {isExporting ? <i className="fa-solid fa-circle-notch fa-spin"></i> : <i className="fa-solid fa-file-excel text-emerald-600"></i>}
+                                            <span className="hidden xl:inline">匯出此筆</span>
                                          </button>
                                          
-                                         {/* Save to Notion Button */}
                                          <button 
                                             onClick={handleSaveToNotion} 
                                             disabled={isNotionLoading || formData.syncStatus === 'notion'} 
-                                            className={`h-9 px-4 rounded-lg text-xs font-bold uppercase tracking-wide transition-all flex items-center gap-2 ml-2 ${
+                                            className={`h-8 px-3 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                                                 formData.syncStatus === 'notion' 
-                                                ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' 
-                                                : 'bg-slate-800 text-white hover:bg-slate-700 shadow-sm'
+                                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/80 cursor-default' 
+                                                : 'bg-slate-900 text-white hover:bg-slate-800 shadow-2xs'
                                             }`}
                                          >
                                             {isNotionLoading ? (
                                                 <i className="fa-solid fa-circle-notch fa-spin"></i>
                                             ) : formData.syncStatus === 'notion' ? (
-                                                <i className="fa-solid fa-check-double"></i>
+                                                <i className="fa-solid fa-check"></i>
                                             ) : (
                                                 <i className="fa-solid fa-cloud-arrow-up"></i>
                                             )}
-                                            {formData.syncStatus === 'notion' ? '已同步到 Notion' : '新增至 Notion'}
+                                            <span className="hidden md:inline">{formData.syncStatus === 'notion' ? 'Notion 已同步' : '同步 Notion'}</span>
                                          </button>
                                      </>
                                 )}
                              </>
                          )}
-                         {/* Delete Button */}
                          {formData ? (
-                             <button onClick={(e) => handleDeleteCard(e, formData.id)} className="h-9 w-9 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="刪除此筆">
-                                 <i className="fa-solid fa-trash"></i>
+                             <button onClick={(e) => handleDeleteCard(e, formData.id)} className="h-8 w-8 flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer" title="刪除此筆">
+                                 <i className="fa-regular fa-trash-can text-xs"></i>
                              </button>
                          ) : (
-                             <button onClick={handleClearAll} disabled={cards.length === 0} className="h-9 px-3 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="清空全部">
-                                 <i className="fa-solid fa-trash-can"></i>
+                             <button onClick={handleClearAll} disabled={cards.length === 0} className="h-8 px-2.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors disabled:opacity-40 cursor-pointer" title="清空全部快取">
+                                 <i className="fa-regular fa-trash-can text-xs"></i>
                              </button>
                          )}
                      </div>
@@ -1826,13 +1970,9 @@ const App: React.FC = () => {
                  <div className="flex-1 relative overflow-hidden" id="detail-panel">
                     {viewMode === 'camera' && (
                         <div className="absolute inset-0 z-50 bg-black">
-                           <CameraScanner onCapture={async (b64) => { 
-                               const id = crypto.randomUUID(); const res = await fetch(`data:image/jpeg;base64,${b64}`);
-                               const blob = await res.blob(); filesMap.current.set(id, blob);
-                               const previewUrl = URL.createObjectURL(blob);
-                               setTasks(prev => [...prev, { id, fileName: `SCAN_${Date.now()}`, status: 'pending', progress: 0, batchIndex: 1, previewUrl }]);
-                               setViewMode('file'); 
-                           }} onClose={() => setViewMode('file')} isMobile={isMobile} />
+                           <Suspense fallback={null}>
+                               <CameraScanner onCapture={handleCameraCapture} onClose={handleCameraClose} isMobile={isMobile} />
+                           </Suspense>
                         </div>
                     )}
 
@@ -2030,39 +2170,40 @@ const App: React.FC = () => {
                                         );
                                     })()}
 
-                                    <div className="grid grid-cols-12 gap-x-4 gap-y-3 items-start">
-                                        {/* Row 0: Category Switcher (Always Rendered) */}
-                                        <div className="col-span-12 mb-3">
-                                            <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+                                    <div className="space-y-5 pb-10">
+                                        {/* Section 1: QS Classification & AI Intro Summary */}
+                                        <section className="bg-slate-50/70 p-4 rounded-2xl border border-slate-200/80 space-y-4">
+                                            <div>
                                                 <div className="flex items-center justify-between mb-2.5">
-                                                    <label className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                                                        <i className="fa-solid fa-layer-group text-indigo-600"></i> QS 名片分類 (Classification)
+                                                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                                                        <i className="fa-solid fa-layer-group text-indigo-600 text-[11px]"></i>
+                                                        <span>QS 國際角色分類</span>
                                                     </label>
-                                                    <span className={`text-xs font-black px-2.5 py-0.5 rounded-full uppercase flex items-center gap-1.5 border shadow-2xs ${
-                                                        formData.category === 'academic' ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                                        formData.category === 'staff' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                                                    <span className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1.5 border ${
+                                                        formData.category === 'academic' ? 'bg-amber-50 text-amber-800 border-amber-200' :
+                                                        formData.category === 'staff' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
                                                         formData.category === 'other' ? 'bg-slate-100 text-slate-700 border-slate-200' :
-                                                        'bg-blue-50 text-blue-700 border-blue-200'
+                                                        'bg-blue-50 text-blue-800 border-blue-200'
                                                     }`}>
                                                         <span className="w-1.5 h-1.5 rounded-full" style={{
                                                             backgroundColor: formData.category === 'academic' ? '#d97706' :
                                                                             formData.category === 'staff' ? '#059669' :
                                                                             formData.category === 'other' ? '#64748b' : '#2563eb'
                                                         }}></span>
-                                                        目前：{
-                                                            formData.category === 'employer' ? '🏢 QS 雇主' :
-                                                            formData.category === 'academic' ? '🎓 QS 學者' :
-                                                            formData.category === 'staff' ? '🤝 QS 職員' :
-                                                            '🚫 非 QS'
+                                                        {
+                                                            formData.category === 'employer' ? 'QS 雇主 (Employer)' :
+                                                            formData.category === 'academic' ? 'QS 學者 (Academic)' :
+                                                            formData.category === 'staff' ? 'QS 職員 (Staff)' :
+                                                            '非 QS (General)'
                                                         }
                                                     </span>
                                                 </div>
                                                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                                                     {[
-                                                        { id: 'employer', label: 'QS 雇主', sub: 'Employer', icon: 'fa-briefcase', emoji: '🏢', activeCls: 'bg-blue-600 text-white shadow-md ring-2 ring-blue-500/20' },
-                                                        { id: 'academic', label: 'QS 學者', sub: 'Academic', icon: 'fa-graduation-cap', emoji: '🎓', activeCls: 'bg-amber-500 text-white shadow-md ring-2 ring-amber-500/20' },
-                                                        { id: 'staff', label: 'QS 職員', sub: 'Staff', icon: 'fa-user-tag', emoji: '🤝', activeCls: 'bg-emerald-600 text-white shadow-md ring-2 ring-emerald-500/20' },
-                                                        { id: 'other', label: '非 QS', sub: 'Not QS', icon: 'fa-ban', emoji: '🚫', activeCls: 'bg-slate-600 text-white shadow-md ring-2 ring-slate-500/20' }
+                                                        { id: 'employer', label: 'QS 雇主', sub: 'Employer', dot: 'bg-blue-500', activeCls: 'bg-blue-600 text-white shadow-xs' },
+                                                        { id: 'academic', label: 'QS 學者', sub: 'Academic', dot: 'bg-amber-500', activeCls: 'bg-amber-500 text-white shadow-xs' },
+                                                        { id: 'staff', label: 'QS 職員', sub: 'Staff', dot: 'bg-emerald-500', activeCls: 'bg-emerald-600 text-white shadow-xs' },
+                                                        { id: 'other', label: '非 QS', sub: 'General', dot: 'bg-slate-400', activeCls: 'bg-slate-700 text-white shadow-xs' }
                                                     ].map(cat => {
                                                         const isSelected = formData.category === cat.id;
                                                         return (
@@ -2075,17 +2216,17 @@ const App: React.FC = () => {
                                                                     setCards(prev => prev.map(c => c.id === formData.id ? updatedCard : c));
                                                                     saveCardToDB(updatedCard);
                                                                 }}
-                                                                className={`py-2 px-2.5 rounded-xl text-xs font-black transition-all flex flex-col items-center justify-center gap-0.5 cursor-pointer border ${
+                                                                className={`py-2 px-3 rounded-xl text-xs font-semibold transition-all flex flex-col items-start gap-0.5 cursor-pointer border ${
                                                                     isSelected
-                                                                        ? `${cat.activeCls} border-transparent scale-[1.02]`
-                                                                        : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-100 border-slate-200'
+                                                                        ? `${cat.activeCls} border-transparent`
+                                                                        : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200/90'
                                                                 }`}
                                                             >
                                                                 <div className="flex items-center gap-1.5">
-                                                                    <span>{cat.emoji}</span>
-                                                                    <span>{cat.label}</span>
+                                                                    <span className={`w-2 h-2 rounded-full ${isSelected ? 'bg-white' : cat.dot}`}></span>
+                                                                    <span className="font-bold">{cat.label}</span>
                                                                 </div>
-                                                                <span className={`text-[10px] font-semibold uppercase tracking-wider ${isSelected ? 'text-white/80' : 'text-slate-400'}`}>
+                                                                <span className={`text-[10px] ${isSelected ? 'text-white/80' : 'text-slate-400'}`}>
                                                                     {cat.sub}
                                                                 </span>
                                                             </button>
@@ -2093,140 +2234,166 @@ const App: React.FC = () => {
                                                     })}
                                                 </div>
                                             </div>
-                                        </div>
 
-                                        {/* Row 0.5: Summary Field (NEW) */}
-                                        <div className="col-span-12 mb-2">
                                             <EditableField 
-                                                label="Intro Summary (簡介)" 
+                                                label="AI 背景簡介 (Summary)" 
                                                 value={formData.summary} 
                                                 onChange={v => updateField('summary', v)} 
-                                                icon="fa-user-pen" 
+                                                icon="fa-wand-magic-sparkles" 
                                                 isTextArea
-                                                className="bg-emerald-50/30 p-2 rounded-lg border border-emerald-100"
                                             />
-                                        </div>
+                                        </section>
 
-                                        {/* Row 1: Identity */}
-                                        <div className="col-span-12 md:col-span-3">
-                                            <EditableField label="Prefix (稱謂)" value={formData.prefix} onChange={v => updateField('prefix', v)} icon="fa-user-tag" />
-                                        </div>
-                                        <div className="col-span-12 md:col-span-4">
-                                            <EditableField label="Last Name (姓氏)" value={formData.lastName} onChange={v => updateField('lastName', v)} />
-                                        </div>
-                                        <div className="col-span-12 md:col-span-5">
-                                            <EditableField label="First Name (名字)" value={formData.firstName} onChange={v => updateField('firstName', v)} />
-                                        </div>
+                                        {/* Section 2: Identity & Organization */}
+                                        <section className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-2xs space-y-3.5">
+                                            <h3 className="text-xs font-bold text-slate-700 flex items-center gap-1.5 pb-1 border-b border-slate-100">
+                                                <i className="fa-regular fa-id-badge text-indigo-500"></i>
+                                                <span>聯絡人與所屬機構</span>
+                                            </h3>
+                                            <div className="grid grid-cols-12 gap-3.5">
+                                                <div className="col-span-12 md:col-span-3">
+                                                    <EditableField label="稱謂 (Prefix)" value={formData.prefix} onChange={v => updateField('prefix', v)} placeholder="Prof. / Dr. / Ms." />
+                                                </div>
+                                                <div className="col-span-12 md:col-span-4">
+                                                    <EditableField label="姓氏 (Last Name)" value={formData.lastName} onChange={v => updateField('lastName', v)} />
+                                                </div>
+                                                <div className="col-span-12 md:col-span-5">
+                                                    <EditableField label="名字 (First Name)" value={formData.firstName} onChange={v => updateField('firstName', v)} />
+                                                </div>
 
-                                        {/* Row 2: Professional */}
-                                        <div className="col-span-12 md:col-span-6">
-                                            <EditableField label="Job Title / Position (職稱)" value={formData.title} translation={formData.translations?.title} onChange={v => updateField('title', v)} icon="fa-id-badge" />
-                                        </div>
-                                        <div className="col-span-12 md:col-span-6">
-                                            <EditableField label="Company / Institution (公司/機構)" value={formData.company} translation={formData.translations?.company} onChange={v => updateField('company', v)} icon="fa-building" />
-                                        </div>
+                                                <div className="col-span-12 md:col-span-6">
+                                                    <EditableField label="職稱 (Job Title)" value={formData.title} translation={formData.translations?.title} onChange={v => updateField('title', v)} icon="fa-briefcase" />
+                                                </div>
+                                                <div className="col-span-12 md:col-span-6">
+                                                    <EditableField label="機構 / 公司 (Organization)" value={formData.company} translation={formData.translations?.company} onChange={v => updateField('company', v)} icon="fa-building" />
+                                                </div>
 
-                                        {/* Row 3: Org Details */}
-                                        <div className="col-span-12 md:col-span-4">
-                                            <EditableField label="Department (部門)" value={formData.department} translation={formData.translations?.department} onChange={v => updateField('department', v)} />
-                                        </div>
-                                        <div className="col-span-12 md:col-span-4">
-                                            <EditableField label="Industry (產業)" value={formData.industry} translation={formData.translations?.industry} onChange={v => updateField('industry', v)} />
-                                        </div>
-                                        <div className="col-span-12 md:col-span-4">
-                                            {formData.category === 'academic' ? (
-                                                <EditableField label="Subject (學科)" value={formData.subject} translation={formData.translations?.subject} onChange={v => updateField('subject', v)} icon="fa-book" className="bg-amber-50/50 rounded" />
-                                            ) : (
-                                                <EditableField 
-                                                    label="Country (國家)" 
-                                                    value={formData.country} 
-                                                    translation={formData.translations?.country} 
-                                                    onChange={v => updateField('country', v)} 
-                                                    onBlur={() => {
-                                                        if (formData.country) updateField('country', normalizeCountry(formData.country));
-                                                    }}
-                                                    options={STANDARD_COUNTRY_OPTIONS}
-                                                    placeholder="例如: Taiwan SAR"
-                                                    icon="fa-flag" 
-                                                />
-                                            )}
-                                        </div>
+                                                <div className="col-span-12 md:col-span-4">
+                                                    <EditableField label="部門 / 學院 (Department)" value={formData.department} translation={formData.translations?.department} onChange={v => updateField('department', v)} />
+                                                </div>
+                                                <div className="col-span-12 md:col-span-4">
+                                                    <EditableField label="產業類別 (Industry)" value={formData.industry} translation={formData.translations?.industry} onChange={v => updateField('industry', v)} />
+                                                </div>
+                                                <div className="col-span-12 md:col-span-4">
+                                                    {formData.category === 'academic' ? (
+                                                        <EditableField label="研究學科 (Subject)" value={formData.subject} translation={formData.translations?.subject} onChange={v => updateField('subject', v)} icon="fa-book" />
+                                                    ) : (
+                                                        <EditableField 
+                                                            label="國家 / 地區 (Country)" 
+                                                            value={formData.country} 
+                                                            translation={formData.translations?.country} 
+                                                            onChange={v => updateField('country', v)} 
+                                                            onBlur={() => {
+                                                                if (formData.country) updateField('country', normalizeCountry(formData.country));
+                                                            }}
+                                                            options={STANDARD_COUNTRY_OPTIONS}
+                                                            placeholder="例如: Taiwan SAR"
+                                                            icon="fa-globe" 
+                                                        />
+                                                    )}
+                                                </div>
 
-                                        {/* Row 4: Digital Contact */}
-                                        <div className="col-span-12 md:col-span-6">
-                                            <EditableField label="Email" value={formData.email} onChange={v => updateField('email', v)} icon="fa-envelope" />
-                                        </div>
-                                        <div className="col-span-12 md:col-span-6">
-                                            <EditableField label="Website" value={formData.website} onChange={v => updateField('website', v)} icon="fa-globe" />
-                                        </div>
-
-                                        {/* Row 5: Phone & Fax */}
-                                        <div className="col-span-12 md:col-span-6">
-                                            <EditableField label="Phone" value={formData.phone} onChange={v => updateField('phone', v)} icon="fa-phone" />
-                                        </div>
-                                        <div className="col-span-12 md:col-span-6">
-                                            <EditableField label="Fax" value={formData.fax} onChange={v => updateField('fax', v)} icon="fa-fax" />
-                                        </div>
-                                        
-                                        {/* Row 6: Extra (Country for Academic if not shown above) */}
-                                        {formData.category === 'academic' && (
-                                            <div className="col-span-12 md:col-span-6">
-                                                <EditableField 
-                                                    label="Country (國家)" 
-                                                    value={formData.country} 
-                                                    translation={formData.translations?.country} 
-                                                    onChange={v => updateField('country', v)} 
-                                                    onBlur={() => {
-                                                        if (formData.country) updateField('country', normalizeCountry(formData.country));
-                                                    }}
-                                                    options={STANDARD_COUNTRY_OPTIONS}
-                                                    placeholder="例如: Taiwan SAR"
-                                                    icon="fa-flag" 
-                                                />
+                                                {formData.category === 'academic' && (
+                                                    <div className="col-span-12 md:col-span-6">
+                                                        <EditableField 
+                                                            label="國家 / 地區 (Country)" 
+                                                            value={formData.country} 
+                                                            translation={formData.translations?.country} 
+                                                            onChange={v => updateField('country', v)} 
+                                                            onBlur={() => {
+                                                                if (formData.country) updateField('country', normalizeCountry(formData.country));
+                                                            }}
+                                                            options={STANDARD_COUNTRY_OPTIONS}
+                                                            placeholder="例如: Taiwan SAR"
+                                                            icon="fa-globe" 
+                                                        />
+                                                    </div>
+                                                )}
                                             </div>
-                                        )}
+                                        </section>
 
-                                        {/* Row 7: Address (Full Width) */}
-                                        <div className="col-span-12">
-                                            <EditableField label="Address" value={formData.address} onChange={v => updateField('address', v)} icon="fa-location-dot" />
-                                        </div>
+                                        {/* Section 3: Contact Channels, AI Reasoning & Notes */}
+                                        <section className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-2xs space-y-3.5">
+                                            <h3 className="text-xs font-bold text-slate-700 flex items-center gap-1.5 pb-1 border-b border-slate-100">
+                                                <i className="fa-regular fa-address-book text-emerald-600"></i>
+                                                <span>聯絡管道與交流備註</span>
+                                            </h3>
+                                            <div className="grid grid-cols-12 gap-3.5">
+                                                <div className="col-span-12 md:col-span-6">
+                                                    <EditableField label="電子信箱 (Email)" value={formData.email} onChange={v => updateField('email', v)} icon="fa-envelope" />
+                                                </div>
+                                                <div className="col-span-12 md:col-span-6">
+                                                    <EditableField label="官方網站 (Website)" value={formData.website} onChange={v => updateField('website', v)} icon="fa-globe" />
+                                                </div>
 
-                                        {/* Row 8: Reasoning & Notes (Compact Side-by-Side) */}
-                                        <div className="col-span-12 md:col-span-6 bg-indigo-50/50 p-3 rounded-lg border border-indigo-100">
-                                            <h4 className="text-xs font-bold text-indigo-500 uppercase tracking-widest mb-1 flex items-center gap-2">
-                                                <i className="fa-solid fa-wand-magic-sparkles"></i> AI Classification Reasoning
-                                            </h4>
-                                            <p className="text-sm text-slate-600 leading-tight font-medium h-20 overflow-y-auto whitespace-pre-line">{formData.reasoning}</p>
-                                        </div>
-                                        <div className="col-span-12 md:col-span-6">
-                                            <EditableField label="Notes" value={formData.notes} onChange={v => updateField('notes', v)} icon="fa-sticky-note" isTextArea className="h-full" />
-                                        </div>
+                                                <div className="col-span-12 md:col-span-6">
+                                                    <EditableField label="聯絡電話 (Phone)" value={formData.phone} onChange={v => updateField('phone', v)} icon="fa-phone" />
+                                                </div>
+                                                <div className="col-span-12 md:col-span-6">
+                                                    <EditableField label="傳真 (Fax)" value={formData.fax} onChange={v => updateField('fax', v)} icon="fa-fax" />
+                                                </div>
+
+                                                <div className="col-span-12">
+                                                    <EditableField label="聯絡地址 (Address)" value={formData.address} onChange={v => updateField('address', v)} icon="fa-location-dot" />
+                                                </div>
+
+                                                <div className="col-span-12 md:col-span-6 bg-indigo-50/40 p-3.5 rounded-xl border border-indigo-100/80 flex flex-col">
+                                                    <h4 className="text-xs font-semibold text-indigo-700 mb-1.5 flex items-center gap-1.5">
+                                                        <i className="fa-solid fa-microchip text-[11px]"></i>
+                                                        <span>AI 分類依據 (可解釋性揭露)</span>
+                                                    </h4>
+                                                    <p className="text-xs text-slate-600 leading-relaxed flex-1 overflow-y-auto whitespace-pre-line">
+                                                        {formData.reasoning || '尚無 AI 分類推論說明'}
+                                                    </p>
+                                                </div>
+                                                <div className="col-span-12 md:col-span-6">
+                                                    <EditableField label="交流備註與會議紀錄 (Notes)" value={formData.notes} onChange={v => updateField('notes', v)} icon="fa-note-sticky" isTextArea className="h-full" placeholder="記錄見面場合、後續合作方向或關懷重點..." />
+                                                </div>
+                                            </div>
+                                        </section>
                                     </div>
 
                                 </div>
                             </div>
                         </div>
                     ) : (
-                        /* Empty State */
-                        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-50/50 p-6">
-                            <div className="w-24 h-24 bg-white rounded-[2rem] shadow-xl shadow-indigo-100 flex items-center justify-center mb-6 animate-float">
-                                <span className="text-5xl">📇✨</span>
-                            </div>
-                            <h2 className="text-2xl font-bold text-slate-800 mb-2">準備開始工作啦！ 🚀</h2>
-                            <p className="max-w-md text-center text-slate-500 mb-6 leading-relaxed">
-                                點擊左邊的名片，讓我為你展示詳細資訊吧！<br/>或是拖曳檔案進來開始掃描～ 🪄✨
-                            </p>
-                            <div className="flex gap-4 text-xs font-medium text-slate-500">
-                                <div className="bg-white border border-slate-200 px-4 py-2 rounded-lg shadow-sm flex items-center gap-2">
-                                    <i className="fa-regular fa-image text-indigo-500"></i>
-                                    <span>名片掃描 (JPG, PNG, PDF)</span>
+                        /* Clean Modern Upload & Workspace Empty State */
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#f8fafc] p-6">
+                            <div
+                                onClick={handleAddClick}
+                                className="w-full max-w-lg bg-white hover:bg-indigo-50/20 border-2 border-dashed border-slate-200 hover:border-indigo-400 rounded-2xl p-8 text-center transition-all cursor-pointer shadow-2xs group"
+                            >
+                                <div className="w-14 h-14 bg-indigo-50 text-indigo-600 group-hover:scale-105 transition-transform rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                    <i className="fa-solid fa-cloud-arrow-up text-xl"></i>
                                 </div>
-                                <div className="bg-white border border-slate-200 px-4 py-2 rounded-lg shadow-sm flex items-center gap-2">
-                                    <i className="fa-solid fa-rotate text-emerald-500"></i>
-                                    <span>資料還原 (JSON)</span>
+                                <h2 className="text-lg font-bold text-slate-900 mb-1.5">點擊上傳或拖曳名片檔案至此</h2>
+                                <p className="text-xs text-slate-500 leading-relaxed mb-5">
+                                    支援單張或多張名片合拍影像（JPG、PNG）、A4 掃描 PDF 自動框選裁切，以及 JSON / CSV 備份還原。
+                                </p>
+                                <div className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 group-hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors">
+                                    <i className="fa-solid fa-folder-open text-[11px]"></i>
+                                    <span>選擇檔案開始辨識</span>
                                 </div>
                             </div>
-                            <p className="mt-4 text-[10px] text-red-400 bg-red-50 px-3 py-1 rounded">注意：系統不支援 Excel 備份還原</p>
+
+                            <div className="flex flex-wrap items-center justify-center gap-2.5 mt-5">
+                                <button
+                                    type="button"
+                                    onClick={() => setViewMode('camera')}
+                                    className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+                                >
+                                    <i className="fa-solid fa-camera text-slate-500"></i>
+                                    <span>開啟相機拍攝</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleLoadDemoCards}
+                                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                                >
+                                    <i className="fa-solid fa-seedling text-emerald-600"></i>
+                                    <span>載入三好永續示範名片</span>
+                                </button>
+                            </div>
                         </div>
                     )}
                  </div>
@@ -2237,14 +2404,16 @@ const App: React.FC = () => {
 
       {/* Duplicate Manager Modal */}
       {showDuplicateManager && (
-          <DuplicateManagerModal
-              groups={duplicateAnalysis.groups}
-              onClose={() => setShowDuplicateManager(false)}
-              onAutoCleanAll={handleAutoDeduplicate}
-              onDeleteSingle={handleDeleteDuplicateSingle}
-              onBatchDelete={handleBatchDeleteDuplicateCards}
-              isProcessing={isDeduplicating}
-          />
+          <Suspense fallback={null}>
+              <DuplicateManagerModal
+                  groups={duplicateAnalysis.groups}
+                  onClose={() => setShowDuplicateManager(false)}
+                  onAutoCleanAll={handleAutoDeduplicate}
+                  onDeleteSingle={handleDeleteDuplicateSingle}
+                  onBatchDelete={handleBatchDeleteDuplicateCards}
+                  isProcessing={isDeduplicating}
+              />
+          </Suspense>
       )}
 
       {/* Duplicate File Prompt Modal */}
@@ -2317,104 +2486,175 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {/* Initial Notion Prompt Modal */}
+      {/* Non-Blocking Notion Sync Prompt Card */}
       {showNotionPrompt && (
-          <div className="fixed inset-0 z-[9999] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 animate-fadeIn">
-              <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl p-6 text-center">
-                  <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <i className="fa-solid fa-cloud-arrow-down text-2xl"></i>
+          <div className="fixed bottom-5 left-5 z-[900] w-[calc(100vw-2.5rem)] max-w-sm bg-white rounded-2xl shadow-xl border border-slate-200/90 p-4 animate-fadeIn">
+              <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center shrink-0">
+                      <i className="fa-solid fa-cloud-arrow-down text-sm"></i>
                   </div>
-                  <h3 className="text-xl font-black text-slate-800 mb-2">要接入 Notion 資料嗎？</h3>
-                  <p className="text-sm text-slate-500 mb-6 leading-relaxed">
-                      系統偵測到您剛進入 APP，是否要立即從 Notion 載入您之前新增的名片資料？
-                  </p>
-                  <div className="flex flex-col gap-3">
-                      <button 
-                          onClick={() => {
-                              setShowNotionPrompt(false);
-                              handleLoadFromNotion();
-                          }} 
-                          className="w-full bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 transition-colors shadow-md shadow-indigo-200 flex items-center justify-center gap-2"
-                      >
-                          <i className="fa-solid fa-check"></i> 是的，立即載入
-                      </button>
-                      <button 
-                          onClick={() => setShowNotionPrompt(false)} 
-                          className="w-full bg-slate-100 text-slate-600 font-bold py-3 rounded-xl hover:bg-slate-200 transition-colors"
-                      >
-                          先不要
-                      </button>
+                  <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                          <h3 className="text-sm font-bold text-slate-900">同步 Notion 雲端名片庫？</h3>
+                          <button
+                              type="button"
+                              onClick={() => setShowNotionPrompt(false)}
+                              className="text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                              title="關閉"
+                          >
+                              <i className="fa-solid fa-xmark"></i>
+                          </button>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                          可隨時一鍵從 Notion 載入最新團隊共用名片資料。
+                      </p>
+                      <div className="flex items-center gap-2 mt-3">
+                          <button 
+                              type="button"
+                              onClick={() => {
+                                  setShowNotionPrompt(false);
+                                  handleLoadFromNotion();
+                              }} 
+                              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                          >
+                              立即載入
+                          </button>
+                          <button 
+                              type="button"
+                              onClick={() => setShowNotionPrompt(false)} 
+                              className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                          >
+                              稍後
+                          </button>
+                          <button 
+                              type="button"
+                              onClick={() => {
+                                  localStorage.setItem('bizmind_skip_notion_prompt', 'true');
+                                  setShowNotionPrompt(false);
+                              }} 
+                              className="ml-auto text-[11px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                          >
+                              不再提醒
+                          </button>
+                      </div>
                   </div>
               </div>
           </div>
       )}
 
       {isNotionLoading && (
-        <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center backdrop-blur-sm">
-            <div className="bg-white p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 max-w-sm w-full mx-4 animate-fadeIn">
-                <div className="w-12 h-12 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin"></div>
+        <div className="fixed inset-0 bg-slate-900/40 z-[9999] flex items-center justify-center backdrop-blur-xs">
+            <div className="bg-white p-7 rounded-2xl shadow-2xl border border-slate-200/80 flex flex-col items-center gap-4 max-w-sm w-full mx-4 animate-fadeIn">
+                <div className="w-10 h-10 border-3 border-indigo-100 border-t-indigo-600 rounded-full animate-spin"></div>
                 <div className="text-center">
-                    <h3 className="text-lg font-bold text-slate-800 mb-1">
-                        {syncProgress ? '正在新增至 Notion... 🚀' : '正在載入 Notion 資料... 📥'}
+                    <h3 className="text-base font-bold text-slate-900 mb-1">
+                        {syncProgress ? '正在同步名片至 Notion' : '正在從 Notion 載入名片'}
                     </h3>
-                    <p className="text-slate-500 text-sm">
+                    <p className="text-slate-500 text-xs tabular-nums">
                         {syncProgress 
-                            ? `已新增 ${syncProgress.current} / ${syncProgress.total} 筆`
-                            : `已載入 ${notionProgress.loaded} 筆`
+                            ? `已完成 ${syncProgress.current} / ${syncProgress.total} 筆`
+                            : `已讀取 ${notionProgress.loaded} 筆`
                         }
                     </p>
                 </div>
-                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden mt-2">
+                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
                     {syncProgress ? (
                         <div 
-                            className="h-full bg-indigo-500 rounded-full transition-all duration-300" 
+                            className="h-full bg-indigo-600 rounded-full transition-all duration-300" 
                             style={{ width: `${(syncProgress.current / syncProgress.total) * 100}%` }}
                         ></div>
                     ) : (
-                        <div className="h-full bg-indigo-500 w-1/3 rounded-full relative overflow-hidden animate-[scan_2s_linear_infinite]"></div>
+                        <div className="h-full bg-indigo-600 w-1/3 rounded-full relative overflow-hidden animate-[scan_2s_linear_infinite]"></div>
                     )}
                 </div>
             </div>
         </div>
       )}
 
+      {/* Warm Greeting Generator Modal (Three Acts of Goodness: Speak Good Words) */}
+      {greetingTargetCard && (
+        <Suspense fallback={null}>
+          <WarmGreetingModal
+            card={greetingTargetCard}
+            onClose={() => setGreetingTargetCard(null)}
+          />
+        </Suspense>
+      )}
+
+      {/* Three-Good Sustainability Impact & AI Disclosure Modal */}
+      {isImpactModalOpen && (
+        <Suspense fallback={null}>
+          <ThreeGoodImpactModal
+            isOpen={isImpactModalOpen}
+            onClose={() => setIsImpactModalOpen(false)}
+            cards={cards}
+            onLoadDemoCards={handleLoadDemoCards}
+            onOpenAiAssistant={() => setChatOpenCounter(c => c + 1)}
+          />
+        </Suspense>
+      )}
+
+      {/* AI Contact Assistant ChatBox */}
+      <Suspense fallback={null}>
+        <ChatBox
+          cards={cards}
+          externalSearchQuery={externalChatQuery}
+          onExternalSearchConsumed={() => setExternalChatQuery(null)}
+          forceOpenCounter={chatOpenCounter}
+          hasBottomBar={selectedCardIds.size > 0}
+          onJumpToCard={(cardId) => {
+            selectCard(cardId);
+            setOpenedFromSearch(viewMode === 'search');
+            setViewMode('detail');
+          }}
+        />
+      </Suspense>
+
       {/* QS Confirmation & Review Modal */}
-      <QsConfirmationModal
-        isOpen={isQsModalOpen}
-        onClose={() => setIsQsModalOpen(false)}
-        selectedCardIds={selectedCardIds}
-        allCards={cards}
-        onToggleCard={handleToggleCardSelect}
-        onSelectAll={() => handleSelectCategory('all')}
-        onDeselectAll={handleDeselectAll}
-        onUpdateCardCategory={handleUpdateCardCategory}
-        onStandardizeSelectedCountries={handleStandardizeSelectedCountries}
-        onExport={handleExportCustomList}
-        isExporting={isExporting}
-        onOpenCardDetail={(id) => {
-          selectCard(id);
-          setViewMode('detail');
-          setIsQsModalOpen(false);
-        }}
-      />
+      {isQsModalOpen && (
+        <Suspense fallback={null}>
+          <QsConfirmationModal
+            isOpen={isQsModalOpen}
+            onClose={() => setIsQsModalOpen(false)}
+            selectedCardIds={selectedCardIds}
+            allCards={cards}
+            onToggleCard={handleToggleCardSelect}
+            onSelectAll={() => handleSelectCategory('all')}
+            onDeselectAll={handleDeselectAll}
+            onUpdateCardCategory={handleUpdateCardCategory}
+            onStandardizeSelectedCountries={handleStandardizeSelectedCountries}
+            onExport={handleExportCustomList}
+            isExporting={isExporting}
+            onOpenCardDetail={(id) => {
+              selectCard(id);
+              setViewMode('detail');
+              setIsQsModalOpen(false);
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* Notion Trash Scan & Restore Modal */}
-      <NotionTrashModal
-        isOpen={showNotionTrashModal}
-        onClose={() => setShowNotionTrashModal(false)}
-        onLoadAllFromNotion={handleLoadFromNotion}
-        onRestoredCards={(restored) => {
-          setCards(prev => {
-            const existingIds = new Set(prev.map(c => c.id));
-            const newOnes = restored.filter(c => !existingIds.has(c.id));
-            const updated = prev.map(c => {
-              const r = restored.find(item => item.id === c.id);
-              return r || c;
-            });
-            return [...newOnes, ...updated].sort((a, b) => b.scannedAt - a.scannedAt);
-          });
-        }}
-      />
+      {showNotionTrashModal && (
+        <Suspense fallback={null}>
+          <NotionTrashModal
+            isOpen={showNotionTrashModal}
+            onClose={() => setShowNotionTrashModal(false)}
+            onLoadAllFromNotion={handleLoadFromNotion}
+            onRestoredCards={(restored) => {
+              setCards(prev => {
+                const existingIds = new Set(prev.map(c => c.id));
+                const newOnes = restored.filter(c => !existingIds.has(c.id));
+                const updated = prev.map(c => {
+                  const r = restored.find(item => item.id === c.id);
+                  return r || c;
+                });
+                return [...newOnes, ...updated].sort((a, b) => b.scannedAt - a.scannedAt);
+              });
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* Global Floating QS Review Pill when cards are selected (visible in detail/file views) */}
       {selectedCardIds.size > 0 && viewMode !== 'search' && (

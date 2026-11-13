@@ -1,23 +1,44 @@
-
 import { BusinessCardData } from '../types';
 
 const DB_NAME = 'QSHubDB_V1_0';
 const STORE_NAME = 'cards';
 
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 const getDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
     try {
       const request = indexedDB.open(DB_NAME, 6);
-      request.onupgradeneeded = (e: any) => {
+      request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
           db.createObjectStore(STORE_NAME, { keyPath: 'id' });
         }
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    } catch (e) { reject(e); }
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        db.onclose = () => {
+          dbPromise = null;
+        };
+        resolve(db);
+      };
+      request.onerror = () => {
+        dbPromise = null;
+        reject(request.error);
+      };
+    } catch (e) {
+      dbPromise = null;
+      reject(e);
+    }
   });
+
+  return dbPromise;
 };
 
 export const saveCardToDB = async (card: BusinessCardData) => {
@@ -31,10 +52,13 @@ export const saveCardToDB = async (card: BusinessCardData) => {
 };
 
 export const saveAllCardsToDB = async (cards: BusinessCardData[]) => {
+  if (cards.length === 0) return true;
   const db = await getDB();
   const tx = db.transaction(STORE_NAME, 'readwrite');
   const store = tx.objectStore(STORE_NAME);
-  cards.forEach(card => store.put(card));
+  for (let i = 0; i < cards.length; i++) {
+    store.put(cards[i]);
+  }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve(true);
     tx.onerror = () => reject(tx.error);
@@ -45,6 +69,20 @@ export const deleteCardFromDB = async (id: string) => {
   const db = await getDB();
   const tx = db.transaction(STORE_NAME, 'readwrite');
   tx.objectStore(STORE_NAME).delete(id);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+export const deleteCardsFromDB = async (ids: string[]) => {
+  if (ids.length === 0) return true;
+  const db = await getDB();
+  const tx = db.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  for (let i = 0; i < ids.length; i++) {
+    store.delete(ids[i]);
+  }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve(true);
     tx.onerror = () => reject(tx.error);
@@ -67,21 +105,15 @@ export const getCardsMetadataFromDB = async (): Promise<BusinessCardData[]> => {
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
-      const items: BusinessCardData[] = [];
-      const request = store.openCursor();
-      request.onsuccess = (event: any) => {
-        const cursor = event.target.result;
-        if (cursor) {
-          // We keep imageUrl so it can be used as a thumbnail in the list view
-          items.push(cursor.value as BusinessCardData);
-          cursor.continue();
-        } else {
-          resolve(items);
-        }
+      const request = store.getAll();
+      request.onsuccess = () => {
+        resolve((request.result as BusinessCardData[]) || []);
       };
       request.onerror = () => resolve([]);
     });
-  } catch (e) { return []; }
+  } catch {
+    return [];
+  }
 };
 
 export const getCardById = async (id: string): Promise<BusinessCardData | null> => {
@@ -94,5 +126,7 @@ export const getCardById = async (id: string): Promise<BusinessCardData | null> 
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
-  } catch (e) { return null; }
+  } catch {
+    return null;
+  }
 };

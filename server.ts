@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
@@ -93,6 +94,7 @@ async function startServer() {
     message: { success: false, error: "Rate limit exceeded for AI/Notion services." }
   });
 
+  let cachedAiClient: { key: string; client: GoogleGenAI } | null = null;
   const getAiClient = () => {
     const apiKey = normalizeSecret(process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || process.env.API_KEY);
     
@@ -101,7 +103,10 @@ async function startServer() {
       error.code = "AI_CONFIG_ERROR";
       throw error;
     }
-    return new GoogleGenAI({ 
+    if (cachedAiClient && cachedAiClient.key === apiKey) {
+      return cachedAiClient.client;
+    }
+    const client = new GoogleGenAI({ 
       apiKey,
       httpOptions: {
         headers: {
@@ -109,11 +114,26 @@ async function startServer() {
         }
       }
     });
+    cachedAiClient = { key: apiKey, client };
+    return client;
+  };
+
+  let cachedNotionClient: { key: string; client: NotionClient } | null = null;
+  const getNotionClient = (apiKey: string) => {
+    if (cachedNotionClient && cachedNotionClient.key === apiKey) {
+      return cachedNotionClient.client;
+    }
+    const client = new NotionClient({ auth: apiKey });
+    cachedNotionClient = { key: apiKey, client };
+    return client;
   };
 
   const notionImageProperty = normalizeSecret(process.env.NOTION_IMAGE_PROPERTY) || 'image_url';
 
   // --- Middleware ---
+  // Enable Gzip/Deflate compression for API JSON payloads and static assets
+  app.use(compression());
+
   // 1. 設定傳輸限制，支援名片圖片 Base64 (統一限制在 30MB 以確保高解析圖片順利傳輸)
   app.use(express.json({ limit: '30mb' }));
   app.use(express.urlencoded({ limit: '30mb', extended: true }));
@@ -473,7 +493,7 @@ async function startServer() {
         throw new Error("[NOTION_CONFIG_ERROR] NOTION_API_KEY is missing.");
       }
 
-      const notion = new NotionClient({ auth: apiKey });
+      const notion = getNotionClient(apiKey);
       
       try {
         await notion.pages.update({
@@ -649,28 +669,36 @@ async function startServer() {
 
       let restoredCount = 0;
       const failedIds: string[] = [];
+      let restoreIdx = 0;
+      const restoreWorker = async () => {
+        while (true) {
+          const i = restoreIdx++;
+          if (i >= pageIds.length) break;
+          const pageId = pageIds[i];
+          try {
+            const resp = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+              method: 'PATCH',
+              headers: { 
+                'Authorization': `Bearer ${apiKey}`, 
+                'Content-Type': 'application/json', 
+                'Notion-Version': '2022-06-28' 
+              },
+              body: JSON.stringify({ archived: false })
+            });
 
-      for (const pageId of pageIds) {
-        try {
-          const resp = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-            method: 'PATCH',
-            headers: { 
-              'Authorization': `Bearer ${apiKey}`, 
-              'Content-Type': 'application/json', 
-              'Notion-Version': '2022-06-28' 
-            },
-            body: JSON.stringify({ archived: false })
-          });
-
-          if (resp.ok) {
-            restoredCount++;
-          } else {
+            if (resp.ok) {
+              restoredCount++;
+            } else {
+              failedIds.push(pageId);
+            }
+          } catch {
             failedIds.push(pageId);
           }
-        } catch (err) {
-          failedIds.push(pageId);
+          await new Promise(r => setTimeout(r, 320));
         }
-      }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(3, pageIds.length) }, () => restoreWorker()));
 
       res.json({ success: true, restoredCount, failedCount: failedIds.length });
     } catch (e: any) {
@@ -690,6 +718,56 @@ async function startServer() {
         const prompt = `請根據以下名片資訊，撰寫一段「精簡專業」的介紹文 (約 50-100 字，繁體中文)。\n姓名: ${card.lastName}${card.firstName}\n公司: ${card.company}\n職稱: ${card.title}\n部門: ${card.department || ''}\n產業: ${card.industry || ''}\n備註: ${card.notes || ''}\n【撰寫要求】：直接回傳純文字，不需標題。`;
         const response = await ai.models.generateContent({ model, contents: prompt });
         return res.json({ success: true, summary: response.text?.trim() || "" });
+      }
+
+      if (action === 'warmGreeting') {
+        const { tone = 'thank_you', language = 'zh-TW', senderNote = '' } = req.body;
+        const toneDesc =
+          tone === 'collaboration'
+            ? '永續發展或產學合作交流邀約（傳遞「給人希望、共創善業」的正向精神）'
+            : tone === 'encouragement'
+            ? '活動後續關懷與誠摯肯定（傳遞「給人信心、說好話」的溫暖讚許）'
+            : '初次交換名片後的誠摯致謝與問候（傳遞「給人歡喜、結善緣」的親切禮貌）';
+        const langDesc =
+          language === 'en'
+            ? '專業且溫暖的國際商務英文 (English)'
+            : language === 'bilingual'
+            ? '繁體中文與英文雙語對照（先繁體中文，後附英文）'
+            : '溫潤得體的繁體中文';
+
+        const prompt = `你是一位融合「三好（做好事、說好話、存好心）」與「四給（給人信心、給人歡喜、給人希望、給人方便）」人文關懷精神的專業國際交流公關顧問。
+請根據以下名片聯絡人資訊，撰寫一封真誠、具體、不浮誇、讓人讀了心生歡喜的問候信草稿：
+- 收件人稱謂與姓名：${card?.prefix || ''} ${card?.lastName || ''} ${card?.firstName || ''}
+- 所屬機構／公司：${card?.company || ''}
+- 部門與職稱：${card?.department || ''} ${card?.title || ''}
+- 國家／地區：${card?.country || ''}
+- 背景簡介：${card?.summary || ''}
+- 交流備註：${card?.notes || ''}
+${senderNote ? `- 補充背景或想提及的事項：${senderNote}` : ''}
+
+【撰寫要求】：
+1. 信件情境：${toneDesc}
+2. 語言格式：${langDesc}
+3. 自然融入對對方專業或機構價值的肯定（「說好話」），語氣真摯溫暖、簡潔好讀（約 120-220 字），切勿流於生硬罐頭信。
+4. 請以 JSON 格式回傳 subject（信件主旨）與 body（信件內文，含稱呼與結尾敬語）。`;
+
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                subject: { type: Type.STRING },
+                body: { type: Type.STRING }
+              },
+              required: ["subject", "body"]
+            }
+          }
+        });
+        const parsed = response.text ? JSON.parse(response.text) : { subject: '', body: '' };
+        return res.json({ success: true, subject: parsed.subject || '', body: parsed.body || '' });
       }
 
       if (action === 'batchSummaries') {
@@ -989,23 +1067,32 @@ async function startServer() {
 
       let deletedCount = 0;
       const bucket = storage.bucket();
+      const docs = snapshot.docs;
+      let gcIdx = 0;
 
-      for (const doc of snapshot.docs) {
-        const asset = doc.data();
-        // Double check refCount
-        if (asset.refCount <= 0) {
-          try {
-            await bucket.file(asset.storagePath).delete();
-            await doc.ref.update({ status: 'deleted', updatedAt: now });
-            deletedCount++;
-          } catch (storageErr: any) {
-            console.error(`Failed to delete storage file ${asset.storagePath}:`, storageErr);
-            // If file not found, still mark as deleted in DB
-            if (storageErr.code === 404) {
+      const gcWorker = async () => {
+        while (true) {
+          const i = gcIdx++;
+          if (i >= docs.length) break;
+          const doc = docs[i];
+          const asset = doc.data();
+          if (asset.refCount <= 0) {
+            try {
+              await bucket.file(asset.storagePath).delete();
               await doc.ref.update({ status: 'deleted', updatedAt: now });
+              deletedCount++;
+            } catch (storageErr: any) {
+              console.error(`Failed to delete storage file ${asset.storagePath}:`, storageErr);
+              if (storageErr.code === 404) {
+                await doc.ref.update({ status: 'deleted', updatedAt: now });
+              }
             }
           }
         }
+      };
+
+      if (docs.length > 0) {
+        await Promise.all(Array.from({ length: Math.min(5, docs.length) }, () => gcWorker()));
       }
 
       res.json({ success: true, deletedCount });
@@ -1132,8 +1219,12 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve('dist');
-    app.use(express.static(distPath));
-    app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(distPath, 'index.html')));
+    app.use('/assets', express.static(path.join(distPath, 'assets'), { maxAge: '1y', immutable: true }));
+    app.use(express.static(distPath, { maxAge: '1h', index: false }));
+    app.get(/^(?!\/api).*/, (req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
 
   app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));

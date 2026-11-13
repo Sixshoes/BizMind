@@ -88,6 +88,8 @@ export type ExportMode =
 
 export type SearchSortOption = 'name_asc' | 'name_desc' | 'company_asc' | 'date_desc' | 'date_asc';
 
+export type SearchDisplayMode = 'table' | 'grid';
+
 export interface SearchPageState {
   query: string;
   sortBy: SearchSortOption;
@@ -96,5 +98,6 @@ export interface SearchPageState {
   filterHasPhone: boolean;
   filterCategory: 'all' | 'employer' | 'academic' | 'staff' | 'other';
   filterCountry: string;
+  displayMode?: SearchDisplayMode;
 }
 

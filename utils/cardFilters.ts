@@ -1,6 +1,5 @@
-
 import { BusinessCardData } from '../types';
-import { normalizeCountry } from './countries';
+import { normalizeCountry, getCountryChineseName } from './countries';
 
 export interface FilterIntent {
   searchText?: string;
@@ -11,86 +10,123 @@ export interface FilterIntent {
   intentType?: 'card_search' | 'general_chat';
 }
 
+interface CachedCardIndex {
+  searchIndex: string;
+  rawCountryLower: string;
+  normCountryLower: string;
+  rawTransCountryLower: string;
+  normTransCountryLower: string;
+  isCountryEmpty: boolean;
+}
+
+const cardIndexCache = new WeakMap<BusinessCardData, CachedCardIndex>();
+
+const getCardIndex = (c: BusinessCardData): CachedCardIndex => {
+  const existing = cardIndexCache.get(c);
+  if (existing) return existing;
+
+  const parts: string[] = [];
+  if (c.firstName) parts.push(String(c.firstName));
+  if (c.lastName) parts.push(String(c.lastName));
+
+  if (c.firstName && c.lastName) {
+    parts.push(
+      `${c.firstName}${c.lastName}`,
+      `${c.lastName}${c.firstName}`,
+      `${c.firstName} ${c.lastName}`,
+      `${c.lastName} ${c.firstName}`
+    );
+  }
+
+  if (c.company) parts.push(String(c.company));
+  if (c.email) parts.push(String(c.email));
+  if (c.phone) parts.push(String(c.phone));
+  if (c.title) parts.push(String(c.title));
+  if (c.summary) parts.push(String(c.summary));
+  if (c.reasoning) parts.push(String(c.reasoning));
+  if (c.notes) parts.push(String(c.notes));
+  if (c.department) parts.push(String(c.department));
+  if (c.industry) parts.push(String(c.industry));
+  if (c.subject) parts.push(String(c.subject));
+  if (c.address) parts.push(String(c.address));
+
+  const rawCountry = (c.country || '').trim();
+  const rawTransCountry = (c.translations?.country || '').trim();
+  const normCountry = rawCountry ? normalizeCountry(rawCountry) : '';
+  const normTransCountry = rawTransCountry ? normalizeCountry(rawTransCountry) : '';
+
+  if (rawCountry) parts.push(rawCountry);
+  if (normCountry) {
+    parts.push(normCountry);
+    const zh = getCountryChineseName(normCountry);
+    if (zh) parts.push(zh);
+  }
+  if (rawTransCountry) parts.push(rawTransCountry);
+  if (normTransCountry) {
+    parts.push(normTransCountry);
+    const transZh = getCountryChineseName(normTransCountry);
+    if (transZh) parts.push(transZh);
+  }
+
+  const built: CachedCardIndex = {
+    searchIndex: parts.join(' ').toLowerCase(),
+    rawCountryLower: rawCountry.toLowerCase(),
+    normCountryLower: normCountry.toLowerCase(),
+    rawTransCountryLower: rawTransCountry.toLowerCase(),
+    normTransCountryLower: normTransCountry.toLowerCase(),
+    isCountryEmpty: !rawCountry && !rawTransCountry,
+  };
+
+  cardIndexCache.set(c, built);
+  return built;
+};
+
 /**
- * Single source of truth for card filtering logic
+ * Single source of truth for card filtering logic (WeakMap-indexed for O(1) per-card index reuse)
  */
 export const filterCards = (cards: BusinessCardData[], intent: FilterIntent): BusinessCardData[] => {
   const { searchText, category, country, requireEmail, requirePhone } = intent;
   const q = searchText?.toLowerCase().trim() || '';
+  const terms = q ? q.split(/\s+/).filter(Boolean) : [];
+  const hasTerms = terms.length > 0;
+  const checkCat = Boolean(category && category !== 'all');
+  const checkCountry = Boolean(country && country !== 'all');
+  const isEmptyCountryFilter = country === '__empty__';
+  const targetCountryLower = checkCountry && !isEmptyCountryFilter ? country!.toLowerCase().trim() : '';
+  const normTargetCountryLower = checkCountry && !isEmptyCountryFilter ? normalizeCountry(country!).toLowerCase() : '';
+
+  if (!hasTerms && !checkCat && !checkCountry && !requireEmail && !requirePhone) {
+    return cards;
+  }
 
   return cards.filter(c => {
-    // 1. Text Search (supports multiple terms separated by spaces, combined names, and cross-field matching)
-    let matchText = true;
-    if (q) {
-      const terms = q.split(/\s+/).filter(Boolean);
-      if (terms.length > 0) {
-        let cardSearchIndex = '';
-        if (c.firstName) cardSearchIndex += ' ' + String(c.firstName).toLowerCase();
-        if (c.lastName) cardSearchIndex += ' ' + String(c.lastName).toLowerCase();
-        
-        // Include combined name options to facilitate searching full names
-        if (c.firstName && c.lastName) {
-          cardSearchIndex += ' ' + `${c.firstName}${c.lastName}`.toLowerCase();
-          cardSearchIndex += ' ' + `${c.lastName}${c.firstName}`.toLowerCase();
-          cardSearchIndex += ' ' + `${c.firstName} ${c.lastName}`.toLowerCase();
-          cardSearchIndex += ' ' + `${c.lastName} ${c.firstName}`.toLowerCase();
-        }
-        
-        if (c.company) cardSearchIndex += ' ' + String(c.company).toLowerCase();
-        if (c.email) cardSearchIndex += ' ' + String(c.email).toLowerCase();
-        if (c.phone) cardSearchIndex += ' ' + String(c.phone).toLowerCase();
-        if (c.title) cardSearchIndex += ' ' + String(c.title).toLowerCase();
-        if (c.summary) cardSearchIndex += ' ' + String(c.summary).toLowerCase();
-        if (c.reasoning) cardSearchIndex += ' ' + String(c.reasoning).toLowerCase();
-        if (c.notes) cardSearchIndex += ' ' + String(c.notes).toLowerCase();
-        if (c.department) cardSearchIndex += ' ' + String(c.department).toLowerCase();
-        if (c.industry) cardSearchIndex += ' ' + String(c.industry).toLowerCase();
-        if (c.subject) cardSearchIndex += ' ' + String(c.subject).toLowerCase();
-        if (c.address) cardSearchIndex += ' ' + String(c.address).toLowerCase();
-        if (c.country) {
-          cardSearchIndex += ' ' + String(c.country).toLowerCase();
-          const norm = normalizeCountry(c.country).toLowerCase();
-          if (norm) cardSearchIndex += ' ' + norm;
-        }
-        if (c.translations?.country) {
-          cardSearchIndex += ' ' + String(c.translations.country).toLowerCase();
-          const transNorm = normalizeCountry(c.translations.country).toLowerCase();
-          if (transNorm) cardSearchIndex += ' ' + transNorm;
-        }
+    if (checkCat && c.category !== category) return false;
+    if (requireEmail && !c.email) return false;
+    if (requirePhone && !c.phone) return false;
 
-        // Every term of the search query must be found somewhere in the card's search index
-        matchText = terms.every(term => cardSearchIndex.includes(term));
-      }
-    }
+    if (!hasTerms && !checkCountry) return true;
 
-    // 2. Category Filter
-    const matchCat = !category || category === 'all' || c.category === category;
+    const idx = getCardIndex(c);
 
-    // 3. Country Filter
-    let matchCountry = true;
-    if (country && country !== 'all') {
-      if (country === '__empty__') {
-        matchCountry = !c.country?.trim() && !c.translations?.country?.trim();
+    if (checkCountry) {
+      if (isEmptyCountryFilter) {
+        if (!idx.isCountryEmpty) return false;
       } else {
-        const target = country.toLowerCase().trim();
-        const normTarget = normalizeCountry(country).toLowerCase();
-        const cardCountry = (c.country || '').toLowerCase().trim();
-        const normCard = normalizeCountry(c.country).toLowerCase();
-        const transCountry = (c.translations?.country || '').toLowerCase().trim();
-        const normTrans = normalizeCountry(c.translations?.country).toLowerCase();
-        
-        matchCountry = 
-          cardCountry === target || 
-          transCountry === target || 
-          (normCard && normCard === normTarget) || 
-          (normTrans && normTrans === normTarget);
+        const matchCountry =
+          idx.rawCountryLower === targetCountryLower ||
+          idx.rawTransCountryLower === targetCountryLower ||
+          (idx.normCountryLower !== '' && idx.normCountryLower === normTargetCountryLower) ||
+          (idx.normTransCountryLower !== '' && idx.normTransCountryLower === normTargetCountryLower);
+        if (!matchCountry) return false;
       }
     }
 
-    // 4. Requirement Filters
-    const matchEmail = !requireEmail || !!c.email;
-    const matchPhone = !requirePhone || !!c.phone;
+    if (hasTerms) {
+      for (let i = 0; i < terms.length; i++) {
+        if (!idx.searchIndex.includes(terms[i])) return false;
+      }
+    }
 
-    return matchText && matchCat && matchCountry && matchEmail && matchPhone;
+    return true;
   });
 };
