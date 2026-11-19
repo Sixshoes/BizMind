@@ -1,8 +1,7 @@
-
 {
-  "name": "EcoScan",
-  "short_name": "EcoScan",
-  "description": "Sustainable Contact Manager & Data Ingester",
+  "name": "BizMind",
+  "short_name": "BizMind",
+  "description": "BizMind · 三好永續智慧人脈與名片管理平台",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#ffffff",

@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useMemo, useCallback, useDeferredValue, Suspense } from 'react';
 import { BusinessCardData, ProcessingTask, ExportMode, SearchPageState } from './types';
 import { filterCards } from './utils/cardFilters';

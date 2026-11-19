@@ -1213,21 +1213,25 @@ ${senderNote ? `- 補充背景或想提及的事項：${senderNote}` : ''}
   });
 
   // --- 8. 解決部署與路徑問題 ---
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer } = await import('vite');
-    const vite = await createServer({ server: { middlewareMode: true }, appType: 'spa' });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.resolve('dist');
-    app.use('/assets', express.static(path.join(distPath, 'assets'), { maxAge: '1y', immutable: true }));
-    app.use(express.static(distPath, { maxAge: '1h', index: false }));
-    app.get(/^(?!\/api).*/, (req, res) => {
-      res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  if (!process.env.VERCEL) {
+    if (process.env.NODE_ENV !== 'production') {
+      const { createServer } = await import('vite');
+      const vite = await createServer({ server: { middlewareMode: true }, appType: 'spa' });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.resolve('dist');
+      app.use('/assets', express.static(path.join(distPath, 'assets'), { maxAge: '1y', immutable: true }));
+      app.use(express.static(distPath, { maxAge: '1h', index: false }));
+      app.get(/^(?!\/api).*/, (req, res) => {
+        res.setHeader('Cache-Control', 'no-cache');
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
+
+    app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
   }
 
-  app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
+  return app;
 }
 
-startServer();
+export default startServer();

@@ -1,13 +1,13 @@
 {
-  "name": "ecoscan---sustainable-contact-manager",
+  "name": "bizmind",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "check-env": "tsx -e \"console.log(process.env.GEMINI_KEY)\"",
     "start": "tsx server.ts",
-    "build": "vite build",
+    "build": "vite build && node scripts/bundle-api.mjs",
     "lint": "tsc --noEmit",
     "preview": "vite preview"
   },
@@ -36,6 +36,7 @@
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
     "autoprefixer": "^10.6.2",
+    "esbuild": "^0.25.0",
     "postcss": "^8.5.32",
     "tailwindcss": "^3.4.19",
     "typescript": "~5.8.2",
