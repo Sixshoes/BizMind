@@ -1,6 +1,6 @@
 {
-  "name": "EcoScan - Sustainable Contact Manager",
-  "description": "Professional desktop-style utility for uploading business cards and extracting data in QS Hub format using Gemini AI.",
+  "name": "BizMind - AI 智慧名片與人脈管理平台",
+  "description": "支援 AI 多卡裁切、正反雙面智慧合併、無紙化 QR 電子名片交換與會後問候信草擬之雲端人脈管理系統。",
   "requestFramePermissions": [
     "camera"
   ],

@@ -1,11 +1,15 @@
+
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { BusinessCardData, ProcessingTask } from '../../types';
-import { compressImageWithMime } from '../../utils/imageUtils';
+import { compressImage } from '../../utils/imageUtils';
 import { extractCardInfo } from '../../services/geminiService';
 import { uploadImageAsset } from '../../utils/firebase';
 import { saveCardToDB, deleteCardFromDB } from '../../services/dbService';
-
-const SCAN_CONCURRENCY = 3;
+import {
+  DEFAULT_CARD_SOURCE,
+  inferCountryFromCard,
+  auditCardQsCategory,
+} from '../../utils/qsValidation';
 
 export const useScanPipeline = (
   cardsRef: React.MutableRefObject<BusinessCardData[]>,
@@ -19,258 +23,223 @@ export const useScanPipeline = (
   const [isProcessing, setIsProcessing] = useState(false);
   const [isQueuePaused, setIsQueuePaused] = useState(false);
   const processingMutex = useRef(false);
-  const inFlightIds = useRef<Set<string>>(new Set());
-  const promptMutex = useRef<Promise<void>>(Promise.resolve());
   const tasksRef = useRef<ProcessingTask[]>(tasks);
   const pausedRef = useRef(isQueuePaused);
 
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
   useEffect(() => { pausedRef.current = isQueuePaused; }, [isQueuePaused]);
 
-  // Serialize interactive modal prompts across concurrent workers
-  const withPromptLock = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
-    const next = promptMutex.current.then(fn, fn);
-    promptMutex.current = next.then(() => undefined, () => undefined);
-    return next;
-  }, []);
-
-  const cleanupFinishedTask = useCallback((task: ProcessingTask) => {
-    filesMap.current.delete(task.id);
-    setTimeout(() => {
-      if (task.previewUrl && task.previewUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(task.previewUrl);
-      }
-      setTasks(prev => prev.filter(t => t.id !== task.id));
-    }, 1500);
-  }, [filesMap, setTasks]);
-
-  const performSingleTask = useCallback(async (task: ProcessingTask) => {
+  const performSingleTask = async (task: ProcessingTask) => {
     try {
-      const fileObj = filesMap.current.get(task.id);
-      if (!fileObj) throw new Error("File missing from memory");
+        const fileObj = filesMap.current.get(task.id);
+        if (!fileObj) throw new Error("File missing from memory");
 
-      const fileName = (fileObj as any).name;
-      if (fileName) {
-        const duplicateFile = cardsRef.current.find(c =>
-          c.originalFileName === fileName && c.originalFileSize === fileObj.size
+        const duplicateFile = cardsRef.current.find(c => 
+            c.originalFileName === (fileObj as any).name && c.originalFileSize === fileObj.size
         );
 
         if (duplicateFile) {
-          const action = await withPromptLock(async () => {
-            const res = await new Promise<'process' | 'skip'>((resolve) => {
-              setDuplicateFilePrompt({
-                fileName: fileName || 'unknown',
-                resolve
-              });
+            const action = await new Promise<'process' | 'skip'>((resolve) => {
+                setDuplicateFilePrompt({
+                    fileName: (fileObj as any).name || 'unknown',
+                    resolve
+                });
             });
             setDuplicateFilePrompt(null);
-            return res;
-          });
-
-          if (action === 'skip') {
-            setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed', progress: 100 } : t));
-            cleanupFinishedTask(task);
-            return;
-          }
+            if (action === 'skip') {
+                setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed', progress: 100 } : t));
+                filesMap.current.delete(task.id);
+                setTimeout(() => {
+                    if (task.previewUrl) URL.revokeObjectURL(task.previewUrl);
+                    setTasks(prev => prev.filter(t => t.id !== task.id));
+                }, 1500);
+                return;
+            }
         }
-      }
 
-      let timeoutId: ReturnType<typeof setTimeout> | undefined;
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error("Timeout (45s)")), 45000);
-      });
-
-      const processAndUpload = async () => {
-        const { base64: base64Data, mimeType } = await compressImageWithMime(fileObj);
-        const localDataUrl = `data:${mimeType};base64,${base64Data}`;
-
-        // Run Gemini OCR and Firebase image upload concurrently
-        const [info, uploadResult] = await Promise.all([
-          extractCardInfo(base64Data, mimeType),
-          uploadImageAsset(localDataUrl, task.id).catch((e) => {
-            console.error("Firebase upload failed during scan", e);
-            return null;
-          })
-        ]);
-
-        return {
-          info,
-          imageUrl: uploadResult?.downloadUrl || localDataUrl,
-          imageId: uploadResult?.imageId,
+        const processWithTimeout = async () => {
+            const base64Data = await compressImage(fileObj);
+            const [info, uprightRes] = await Promise.all([
+              extractCardInfo(base64Data, 'image/jpeg'),
+              fetch('/api/cards/auto-upright', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ base64: base64Data, mimeType: 'image/jpeg' }),
+              })
+                .then((r) => r.json())
+                .catch(() => ({ rotation: 0 })),
+            ]);
+            return { base64Data, info, autoRotation: Number(uprightRes?.rotation || 0) };
         };
-      };
 
-      let info: any;
-      let imageUrl: string;
-      let imageId: string | undefined;
-      try {
-        const result = await Promise.race([processAndUpload(), timeoutPromise]);
-        info = result.info;
-        imageUrl = result.imageUrl;
-        imageId = result.imageId;
-      } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-      }
+        const timeoutPromise = new Promise<{base64Data: string, info: any, autoRotation: number}>((_, reject) => 
+            setTimeout(() => reject(new Error("Timeout (45s)")), 45000)
+        );
 
-      const newCard: BusinessCardData = {
-        notes: '',
-        prefix: '',
-        fax: '',
-        summary: '',
-        reasoning: '',
-        ...info,
-        id: task.id,
-        scannedAt: Date.now(),
-        source: 'EcoScan',
-        imageUrl,
-        imageId,
-        originalFileName: fileName,
-        originalFileSize: fileObj.size,
-        syncStatus: imageUrl.startsWith('http') ? 'firebase' : 'local',
-      };
+        const { base64Data, info, autoRotation } = await Promise.race([processWithTimeout(), timeoutPromise]);
 
-      // Serialize duplicate check + insertion so concurrent workers see up-to-date cardsRef
-      await withPromptLock(async () => {
+        let imageUrl = `data:image/jpeg;base64,${base64Data}`;
+        let imageId: string | undefined = undefined;
+        try {
+            const uploadResult = await uploadImageAsset(imageUrl, task.id);
+            imageUrl = uploadResult.downloadUrl;
+            imageId = uploadResult.imageId;
+        } catch (e) {
+            console.error("Firebase upload failed during scan", e);
+        }
+
+        const draftCard: BusinessCardData = {
+            notes: '',
+            prefix: '',
+            fax: '',
+            summary: '',
+            reasoning: '',
+            ...info,
+            id: task.id,
+            scannedAt: Date.now(),
+            source: DEFAULT_CARD_SOURCE,
+            rotation: autoRotation,
+            imageUrl: imageUrl,
+            imageId: imageId,
+            originalFileName: (fileObj as any).name,
+            originalFileSize: fileObj.size,
+            syncStatus: imageUrl.startsWith('http') ? 'firebase' : 'local',
+        };
+
+        const inferredCtry = inferCountryFromCard(draftCard);
+        if (inferredCtry && !draftCard.country) {
+            draftCard.country = inferredCtry;
+        }
+        const qsAudit = auditCardQsCategory(draftCard);
+        if (qsAudit.hasError) {
+            draftCard.category = qsAudit.suggestedCategory;
+        }
+
+        const newCard: BusinessCardData = draftCard;
+
+        // Robust similarity / duplicate check
         let similarityReason = "";
-        const cleanPhone = (p: string) => p.replace(/\D/g, '');
-        const newPhone = cleanPhone(newCard.phone || '');
-        const newFullName = `${newCard.lastName || ''}${newCard.firstName || ''}`.trim().toLowerCase();
-        const newComp = (newCard.company || '').trim().toLowerCase();
-        const newEmail = newCard.email?.trim().toLowerCase() || '';
-
         const duplicate = cardsRef.current.find(c => {
-          if (c.email && newEmail && c.email.trim().toLowerCase() === newEmail) {
-            similarityReason = `電子郵件相同 (${c.email})`;
-            return true;
-          }
-
-          const cPhone = cleanPhone(c.phone || '');
-          if (cPhone && newPhone && cPhone.length >= 8 && cPhone === newPhone) {
-            similarityReason = `電話號碼相同 (${c.phone})`;
-            return true;
-          }
-
-          const cFullName = `${c.lastName || ''}${c.firstName || ''}`.trim().toLowerCase();
-          const cComp = (c.company || '').trim().toLowerCase();
-
-          if (cFullName && newFullName && cFullName === newFullName) {
-            if (cComp === newComp && cComp !== '') {
-              similarityReason = `姓名與公司名稱完全相同`;
-              return true;
+            // 1. Check exact email match
+            if (c.email && newCard.email && c.email.trim().toLowerCase() === newCard.email.trim().toLowerCase()) {
+                similarityReason = `電子郵件相同 (${c.email})`;
+                return true;
             }
-            if (cComp === '' || newComp === '' || cComp.includes(newComp) || newComp.includes(cComp)) {
-              similarityReason = `姓名相同 (${cFullName})，且公司相似或其中一方未填寫`;
-              return true;
-            }
-          }
 
-          if (cFullName && newFullName && cFullName.length >= 2 && newFullName.length >= 2) {
-            const namesIntersect = cFullName.includes(newFullName) || newFullName.includes(cFullName);
-            const companyIntersect = cComp && newComp && (cComp.includes(newComp) || newComp.includes(cComp));
-            if (namesIntersect && companyIntersect) {
-              similarityReason = `姓名與公司名稱高度相似`;
-              return true;
+            // 2. Check phone/mobile match (clean numbers, minimum 8 digits to avoid false matching short codes)
+            const cleanPhone = (p: string) => p.replace(/\D/g, '');
+            const cPhone = cleanPhone(c.phone || '');
+            const newPhone = cleanPhone(newCard.phone || '');
+            if (cPhone && newPhone && cPhone.length >= 8 && cPhone === newPhone) {
+                similarityReason = `電話號碼相同 (${c.phone})`;
+                return true;
             }
-          }
 
-          return false;
+            // 3. Name + Company comparison
+            const cFullName = `${c.lastName || ''}${c.firstName || ''}`.trim().toLowerCase();
+            const newFullName = `${newCard.lastName || ''}${newCard.firstName || ''}`.trim().toLowerCase();
+            const cComp = (c.company || '').trim().toLowerCase();
+            const newComp = (newCard.company || '').trim().toLowerCase();
+
+            if (cFullName && newFullName && cFullName === newFullName) {
+                if (cComp === newComp && cComp !== '') {
+                    similarityReason = `姓名與公司名稱完全相同`;
+                    return true;
+                }
+                if (cComp === '' || newComp === '' || cComp.includes(newComp) || newComp.includes(cComp)) {
+                    similarityReason = `姓名相同 (${cFullName})，且公司相似或其中一方未填寫`;
+                    return true;
+                }
+            }
+
+            // 4. Fuzzy Name + Company matching (e.g. partial overlapping names and company names)
+            if (cFullName && newFullName && cFullName.length >= 2 && newFullName.length >= 2) {
+                const namesIntersect = cFullName.includes(newFullName) || newFullName.includes(cFullName);
+                const companyIntersect = cComp && newComp && (cComp.includes(newComp) || newComp.includes(cComp));
+                if (namesIntersect && companyIntersect) {
+                    similarityReason = `姓名與公司名稱高度相似`;
+                    return true;
+                }
+            }
+
+            return false;
         });
 
         if (duplicate) {
-          const action = await new Promise<'replace' | 'keep' | 'discard'>((resolve) => {
-            setDuplicatePrompt({
-              newCard,
-              oldCard: duplicate,
-              reason: similarityReason,
-              resolve
+            const action = await new Promise<'replace' | 'keep' | 'discard'>((resolve) => {
+                setDuplicatePrompt({
+                    newCard,
+                    oldCard: duplicate,
+                    reason: similarityReason,
+                    resolve
+                });
             });
-          });
-          setDuplicatePrompt(null);
-
-          if (action === 'discard') {
-            setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed', progress: 100 } : t));
-            cleanupFinishedTask(task);
-            return;
-          } else if (action === 'replace') {
-            await deleteCardFromDB(duplicate.id);
-            cardsRef.current = cardsRef.current.filter(c => c.id !== duplicate.id);
-            setCards(prev => prev.filter(c => c.id !== duplicate.id));
-          }
+            setDuplicatePrompt(null);
+            if (action === 'discard') {
+                setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed', progress: 100 } : t));
+                filesMap.current.delete(task.id);
+                setTimeout(() => {
+                    if (task.previewUrl) URL.revokeObjectURL(task.previewUrl);
+                    setTasks(prev => prev.filter(t => t.id !== task.id));
+                }, 1500);
+                return;
+            } else if (action === 'replace') {
+                await deleteCardFromDB(duplicate.id);
+                setCards(prev => prev.filter(c => c.id !== duplicate.id));
+            }
         }
 
         await saveCardToDB(newCard);
-        cardsRef.current = [newCard, ...cardsRef.current];
-        setCards(prev => [newCard, ...prev].sort((a, b) => b.scannedAt - a.scannedAt));
+        setCards(prev => [newCard, ...prev].sort((a,b) => b.scannedAt - a.scannedAt));
         setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'completed', progress: 100 } : t));
-        cleanupFinishedTask(task);
-      });
+        filesMap.current.delete(task.id);
+        setTimeout(() => {
+            if (task.previewUrl) URL.revokeObjectURL(task.previewUrl);
+            setTasks(prev => prev.filter(t => t.id !== task.id));
+        }, 1500);
 
     } catch (err: any) {
-      console.error(`Task ${task.id} Failed:`, err);
-      let errorMsg = err.message || "處理失敗";
-      if (errorMsg.includes('spending cap') || errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('429')) {
-        errorMsg = "AI 專案預算上限已達 (429)";
-      } else if (errorMsg.includes('Timeout')) {
-        errorMsg = "AI 回應超時";
-      } else if (errorMsg.includes('500') || errorMsg.includes('Internal')) {
-        errorMsg = "伺服器錯誤 (500)";
-      }
-      setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'error', error: errorMsg } : t));
+        console.error(`Task ${task.id} Failed:`, err);
+        let errorMsg = err.message || "處理失敗";
+        if (errorMsg.includes('spending cap') || errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('429')) {
+            errorMsg = "AI 專案預算上限已達 (429)";
+        } else if (errorMsg.includes('Timeout')) {
+            errorMsg = "AI 回應超時";
+        } else if (errorMsg.includes('500') || errorMsg.includes('Internal')) {
+            errorMsg = "伺服器錯誤 (500)";
+        }
+        setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: 'error', error: errorMsg } : t));
     }
-  }, [cardsRef, cleanupFinishedTask, filesMap, setCards, setDuplicateFilePrompt, setDuplicatePrompt, setTasks, withPromptLock]);
+  };
 
   const processQueue = useCallback(async () => {
     if (processingMutex.current || pausedRef.current) return;
-    const hasPending = tasksRef.current.some(t => t.status === 'pending' && !inFlightIds.current.has(t.id));
-    if (!hasPending) return;
-
     processingMutex.current = true;
     setIsProcessing(true);
-
-    const claimNextTask = (): ProcessingTask | undefined => {
-      if (pausedRef.current) return undefined;
-      const next = tasksRef.current.find(t => t.status === 'pending' && !inFlightIds.current.has(t.id));
-      if (!next) return undefined;
-      inFlightIds.current.add(next.id);
-      tasksRef.current = tasksRef.current.map(t => t.id === next.id ? { ...t, status: 'processing' } : t);
-      setTasks(prev => prev.map(t => t.id === next.id ? { ...t, status: 'processing' } : t));
-      return next;
-    };
-
-    const runWorker = async () => {
-      while (!pausedRef.current) {
-        const nextTask = claimNextTask();
-        if (!nextTask) break;
-        try {
-          await performSingleTask(nextTask);
-        } finally {
-          inFlightIds.current.delete(nextTask.id);
-        }
-      }
-    };
-
     try {
-      while (!pausedRef.current) {
-        const pendingCount = tasksRef.current.filter(t => t.status === 'pending' && !inFlightIds.current.has(t.id)).length;
-        if (pendingCount === 0) break;
-        const workerCount = Math.min(SCAN_CONCURRENCY, pendingCount);
-        await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
-      }
+        while (true) {
+            if (pausedRef.current) break;
+            const nextTask = tasksRef.current.find(t => t.status === 'pending');
+            if (!nextTask) break;
+            setTasks(prev => prev.map(t => t.id === nextTask.id ? { ...t, status: 'processing' } : t));
+            await performSingleTask(nextTask);
+            await new Promise(r => setTimeout(r, 500));
+        }
     } finally {
-      processingMutex.current = false;
-      setIsProcessing(false);
+        processingMutex.current = false;
+        setIsProcessing(false);
     }
-  }, [performSingleTask, setTasks]);
+  }, [setTasks, performSingleTask]);
 
   useEffect(() => {
     if (!isQueuePaused && !isProcessing) {
-      processQueue();
+        processQueue();
     }
   }, [tasks, isQueuePaused, isProcessing, processQueue]);
 
-  const handleRetryTask = useCallback((taskId: string) => {
+  const handleRetryTask = (taskId: string) => {
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'pending', error: undefined } : t));
-  }, [setTasks]);
+  };
 
   const processBatchFiles = useCallback((files: FileList | File[]) => {
     const newTasks: ProcessingTask[] = [];

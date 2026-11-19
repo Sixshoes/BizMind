@@ -439,6 +439,23 @@ export const mergeDuplicateCards = (
     if (!merged.imageUrl && dup.imageUrl) {
       merged.imageUrl = dup.imageUrl;
       merged.imageId = dup.imageId;
+      merged.rotation = dup.rotation;
+    }
+    if (!merged.backImageUrl && dup.backImageUrl) {
+      merged.backImageUrl = dup.backImageUrl;
+      merged.backImageId = dup.backImageId;
+      merged.backRotation = dup.backRotation;
+    }
+    if ((!merged.source || merged.source === 'BizMind') && dup.source && dup.source !== 'BizMind') {
+      merged.source = dup.source;
+    }
+    if (!merged.source) {
+      merged.source = 'BizMind';
+    }
+
+    // Merge custom tags
+    if (dup.tags && dup.tags.length > 0) {
+      merged.tags = Array.from(new Set([...(merged.tags || []), ...dup.tags]));
     }
 
     // Merge notes if distinct

@@ -1,5 +1,14 @@
 import React, { useState, useMemo } from 'react';
-import { BusinessCardData } from '../types';
+import {
+  Layers,
+  Zap,
+  Check,
+  Trash2,
+  X,
+  Info,
+  Loader2,
+  CheckCircle2,
+} from 'lucide-react';
 import { DuplicateGroup, calculateCardQualityScore } from '../utils/duplicateUtils';
 import { CardThumbnail } from './CardThumbnail';
 
@@ -18,23 +27,21 @@ export const DuplicateManagerModal: React.FC<DuplicateManagerModalProps> = ({
   onAutoCleanAll,
   onDeleteSingle,
   onBatchDelete,
-  isProcessing = false
+  isProcessing = false,
 }) => {
-  // Map of groupId -> cardId to keep
   const [keepMap, setKeepMap] = useState<Map<string, string>>(() => {
     const map = new Map<string, string>();
-    groups.forEach(g => {
+    groups.forEach((g) => {
       map.set(g.id, g.primaryCardId);
     });
     return map;
   });
 
-  // Set of selected cards for manual deletion
   const [selectedDeletions, setSelectedDeletions] = useState<Set<string>>(() => {
     const set = new Set<string>();
-    groups.forEach(g => {
+    groups.forEach((g) => {
       const keepId = g.primaryCardId;
-      g.cards.forEach(c => {
+      g.cards.forEach((c) => {
         if (c.id !== keepId) {
           set.add(c.id);
         }
@@ -42,11 +49,6 @@ export const DuplicateManagerModal: React.FC<DuplicateManagerModalProps> = ({
     });
     return set;
   });
-
-  // Calculate stats
-  const totalCardsInGroups = useMemo(() => {
-    return groups.reduce((acc, g) => acc + g.cards.length, 0);
-  }, [groups]);
 
   const redundantCount = useMemo(() => {
     return groups.reduce((acc, g) => acc + (g.cards.length - 1), 0);
@@ -57,11 +59,10 @@ export const DuplicateManagerModal: React.FC<DuplicateManagerModalProps> = ({
     newKeepMap.set(groupId, cardId);
     setKeepMap(newKeepMap);
 
-    // Update selected deletions
     const newSelected = new Set(selectedDeletions);
-    const targetGroup = groups.find(g => g.id === groupId);
+    const targetGroup = groups.find((g) => g.id === groupId);
     if (targetGroup) {
-      targetGroup.cards.forEach(c => {
+      targetGroup.cards.forEach((c) => {
         if (c.id === cardId) {
           newSelected.delete(c.id);
         } else {
@@ -72,217 +73,201 @@ export const DuplicateManagerModal: React.FC<DuplicateManagerModalProps> = ({
     setSelectedDeletions(newSelected);
   };
 
-  const handleToggleCardDelete = (cardId: string, groupId: string) => {
-    const currentKeepId = keepMap.get(groupId);
-    if (cardId === currentKeepId) {
-      // Cannot delete the keep card without picking another keep card
-      return;
-    }
-    const newSelected = new Set(selectedDeletions);
-    if (newSelected.has(cardId)) {
-      newSelected.delete(cardId);
-    } else {
-      newSelected.add(cardId);
-    }
-    setSelectedDeletions(newSelected);
-  };
-
   return (
-    <div className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-fadeIn">
-      <div className="bg-white w-full max-w-3xl max-h-[92vh] flex flex-col rounded-2xl shadow-2xl overflow-hidden border border-slate-200">
-        
+    <div
+      className="fixed inset-0 z-[9999] bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="bg-white w-full max-w-3xl max-h-[90vh] flex flex-col rounded-2xl shadow-xl overflow-hidden border border-slate-200 animate-scaleUp"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/80">
+        <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shadow-md shadow-amber-200 shrink-0">
-              <i className="fa-solid fa-wand-magic-sparkles text-lg"></i>
+            <div className="w-9 h-9 rounded-lg bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center shrink-0">
+              <Layers className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-lg sm:text-xl font-black text-slate-900">智慧移除重複名片</h3>
-                <span className="bg-rose-50 text-rose-600 text-xs font-bold px-2 py-0.5 rounded-full border border-rose-100">
-                  {groups.length} 組重複 ({redundantCount} 張可清理)
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-base font-semibold font-display text-slate-900">
+                  重複聯絡人偵測與合併管理
+                </h3>
+                <span className="text-xs font-semibold text-amber-700 tabular-nums">
+                  · {groups.length} 組重複 ({redundantCount} 筆可合併清理)
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                判定標準：必須同時符合 <span className="font-bold text-slate-700">Email</span> 與 <span className="font-bold text-slate-700">姓名</span>，且至少再符合 1 項其他欄位（如公司、電話、職稱等，共 3 項以上）
+                自動保留完整度最高之主紀錄，並將重複卡片的備註、電話、標籤與反面影像合併至主名片
               </p>
             </div>
           </div>
-          <button 
+          <button
             type="button"
-            onClick={onClose} 
+            onClick={onClose}
             disabled={isProcessing}
-            className="w-9 h-9 rounded-xl bg-white border border-slate-200 text-slate-400 hover:text-slate-600 hover:bg-slate-50 flex items-center justify-center transition-colors cursor-pointer"
-            title="關閉"
+            className="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+            aria-label="關閉"
           >
-            <i className="fa-solid fa-xmark"></i>
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Quick Action Banner */}
-        <div className="bg-amber-50/60 border-b border-amber-100 px-4 sm:px-6 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs text-amber-900 font-medium">
-            <i className="fa-solid fa-circle-info text-amber-500 text-sm shrink-0"></i>
-            <span>執行「自動一鍵清理」會將重複項的補充欄位（備註、電話、紙本數）自動合併至主名片中，並安全刪除多餘重複項。</span>
+        {/* Action Strip */}
+        <div className="bg-amber-50/60 border-b border-amber-200/70 px-5 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs text-amber-900">
+            <Info className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>點擊任一張名片可改設為「主保留項目」，再執行自動合併清理。</span>
           </div>
           <button
             type="button"
             onClick={() => onAutoCleanAll(keepMap)}
             disabled={isProcessing || groups.length === 0}
-            className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-black flex items-center justify-center gap-2 shadow-md shadow-indigo-100 transition-all cursor-pointer shrink-0"
+            className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shrink-0 tabular-nums"
           >
             {isProcessing ? (
               <>
-                <i className="fa-solid fa-circle-notch fa-spin"></i>
-                <span>清理合併中...</span>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>合併清理中...</span>
               </>
             ) : (
               <>
-                <i className="fa-solid fa-bolt"></i>
-                <span>一鍵自動清理 ({redundantCount} 張)</span>
+                <Zap className="w-3.5 h-3.5" />
+                <span>一鍵合併並清理 ({redundantCount} 筆)</span>
               </>
             )}
           </button>
         </div>
 
         {/* Groups List */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 custom-scrollbar bg-slate-50/40">
+        <div className="flex-1 overflow-y-auto p-5 space-y-5 custom-scrollbar bg-slate-50/60">
           {groups.length === 0 ? (
-            <div className="py-12 text-center text-slate-400">
-              <i className="fa-solid fa-circle-check text-4xl text-emerald-500 mb-3"></i>
-              <p className="text-base font-bold text-slate-700">太棒了！名片庫已沒有任何重複項目</p>
+            <div className="py-14 text-center text-slate-500 flex flex-col items-center">
+              <CheckCircle2 className="w-10 h-10 text-emerald-500 mb-3" />
+              <p className="text-sm font-semibold text-slate-800">名片庫目前沒有任何重複項目</p>
             </div>
           ) : (
             groups.map((group, groupIndex) => {
               const currentKeepId = keepMap.get(group.id) || group.primaryCardId;
-              
+
               return (
-                <div key={group.id} className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden">
-                  
-                  {/* Group Header */}
-                  <div className="bg-slate-50 px-4 py-2.5 border-b border-slate-200/70 flex items-center justify-between flex-wrap gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 text-[11px] font-black flex items-center justify-center">
-                        {groupIndex + 1}
+                <div
+                  key={group.id}
+                  className="bg-white rounded-xl border border-slate-200 overflow-hidden"
+                >
+                  <div className="bg-slate-50 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-xs font-mono font-semibold text-indigo-600 tabular-nums">
+                        #{groupIndex + 1}
                       </span>
-                      <h4 className="font-bold text-slate-800 text-sm">
+                      <h4 className="font-semibold text-slate-800 text-xs truncate">
                         {group.reason}
                       </h4>
                     </div>
-                    <span className="text-[11px] text-slate-400 font-medium">
-                      共 {group.cards.length} 筆相似資料
+                    <span className="text-xs text-slate-500 tabular-nums">
+                      共 {group.cards.length} 筆相似紀錄
                     </span>
                   </div>
 
-                  {/* Cards in Group */}
-                  <div className="p-3 sm:p-4 space-y-2.5">
-                    {group.cards.map(card => {
+                  <div className="p-3.5 space-y-2">
+                    {group.cards.map((card) => {
                       const isKeep = card.id === currentKeepId;
                       const isMarkedDelete = selectedDeletions.has(card.id);
                       const qualityScore = calculateCardQualityScore(card);
                       const isRecommendedOriginal = card.id === group.primaryCardId;
 
                       return (
-                        <div 
+                        <div
                           key={card.id}
                           onClick={() => handleSelectKeep(group.id, card.id)}
-                          className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
+                          className={`p-3 rounded-lg border transition-colors cursor-pointer flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
                             isKeep
-                              ? 'bg-emerald-50/40 border-emerald-400 ring-2 ring-emerald-400/20'
+                              ? 'bg-emerald-50/40 border-emerald-400 ring-1 ring-emerald-400/20'
                               : isMarkedDelete
                               ? 'bg-rose-50/20 border-rose-200 hover:border-rose-300'
                               : 'bg-white border-slate-200 hover:border-slate-300'
                           }`}
                         >
-                          {/* Selection Control & Thumbnail */}
                           <div className="flex items-center gap-3 flex-1 min-w-0">
-                            <div className="shrink-0 flex items-center justify-center">
-                              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                                isKeep 
-                                  ? 'border-emerald-600 bg-emerald-600 text-white' 
+                            <div
+                              className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 ${
+                                isKeep
+                                  ? 'border-emerald-600 bg-emerald-600 text-white'
                                   : 'border-slate-300 bg-white'
-                              }`}>
-                                {isKeep && <i className="fa-solid fa-check text-[10px]"></i>}
-                              </div>
+                              }`}
+                            >
+                              {isKeep && <Check className="w-3 h-3" />}
                             </div>
 
-                            {/* Card Image / Avatar */}
-                            <CardThumbnail card={card} size="lg" className="rounded-lg shadow-2xs" />
+                            <CardThumbnail card={card} size="md" className="rounded-md" />
 
-                            {/* Card Info */}
                             <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="font-bold text-slate-900 text-sm">
-                                  {`${card.lastName || ''}${card.firstName || ''}` || card.company || '未命名'}
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-semibold text-slate-900 text-sm">
+                                  {`${card.lastName || ''}${card.firstName || ''}` ||
+                                    card.company ||
+                                    '未命名'}
                                 </span>
                                 {card.title && (
-                                  <span className="text-xs text-slate-500 font-medium">
-                                    • {card.title}
-                                  </span>
+                                  <span className="text-xs text-slate-500">· {card.title}</span>
                                 )}
                                 {isKeep && (
-                                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-black px-2 py-0.5 rounded-full flex items-center gap-1">
-                                    <i className="fa-solid fa-star text-[9px]"></i> 保留此主版本
+                                  <span className="text-[11px] font-semibold text-emerald-700">
+                                    · 保留主版本
                                   </span>
                                 )}
                                 {!isKeep && isRecommendedOriginal && (
-                                  <span className="bg-blue-50 text-blue-700 text-[10px] font-bold px-1.5 py-0.5 rounded border border-blue-200">
-                                    AI 建議
+                                  <span className="text-[11px] font-medium text-indigo-600">
+                                    · 系統推薦
                                   </span>
                                 )}
                                 {!isKeep && isMarkedDelete && (
-                                  <span className="bg-rose-100 text-rose-700 text-[10px] font-bold px-1.5 py-0.5 rounded">
-                                    預計刪除
+                                  <span className="text-[11px] font-medium text-rose-600">
+                                    · 待合併移除
                                   </span>
                                 )}
                               </div>
 
-                              <div className="text-xs text-slate-600 mt-0.5 flex items-center gap-2 flex-wrap">
-                                <span className="font-medium text-slate-700">{card.company || '無公司'}</span>
-                                {card.country && (
-                                  <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded">
-                                    📍 {card.country}
-                                  </span>
-                                )}
-                                {card.email && (
-                                  <span className="text-slate-500 text-[11px] truncate max-w-[180px]">
-                                    ✉️ {card.email}
-                                  </span>
-                                )}
-                                {card.phone && (
-                                  <span className="text-slate-500 text-[11px]">
-                                    📞 {card.phone}
-                                  </span>
-                                )}
+                              <div className="text-xs text-slate-600 mt-0.5 truncate">
+                                {[card.company || '無公司', card.country, card.email, card.phone]
+                                  .filter(Boolean)
+                                  .join(' · ')}
                               </div>
 
-                              <div className="text-[10px] text-slate-400 mt-1 flex items-center gap-3">
-                                <span>掃描於: {new Date(card.scannedAt).toLocaleDateString()}</span>
-                                <span>完整度評分: <strong className="text-slate-600">{qualityScore} 分</strong></span>
-                                {card.syncStatus === 'notion' && (
-                                  <span className="text-emerald-600 font-medium">✓ 已同步 Notion</span>
+                              <div className="text-[11px] text-slate-400 mt-1 flex items-center gap-2 tabular-nums">
+                                <span>掃描日期：{new Date(card.scannedAt).toLocaleDateString()}</span>
+                                <span>·</span>
+                                <span>完整度：{qualityScore} 分</span>
+                                {card.syncStatus === 'firebase' && (
+                                  <>
+                                    <span>·</span>
+                                    <span className="text-sky-600 font-medium">已同步雲端</span>
+                                  </>
                                 )}
                               </div>
                             </div>
                           </div>
 
-                          {/* Action Button */}
-                          <div className="flex items-center gap-2 self-end sm:self-center shrink-0" onClick={e => e.stopPropagation()}>
+                          <div
+                            className="flex items-center gap-2 self-end sm:self-center shrink-0"
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             {isKeep ? (
-                              <span className="text-xs font-bold text-emerald-700 px-2 py-1 bg-emerald-100/70 rounded-lg">
-                                主要保留項目
+                              <span className="text-xs font-semibold text-emerald-700 px-2.5 py-1">
+                                主保留項目
                               </span>
                             ) : (
                               <button
                                 type="button"
                                 onClick={() => onDeleteSingle(card.id)}
                                 disabled={isProcessing}
-                                className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                className="px-2.5 py-1.5 bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                                 title="直接刪除此筆重複資料"
                               >
-                                <i className="fa-solid fa-trash-can text-[11px]"></i>
-                                <span>刪除</span>
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>單獨刪除</span>
                               </button>
                             )}
                           </div>
@@ -296,26 +281,28 @@ export const DuplicateManagerModal: React.FC<DuplicateManagerModalProps> = ({
           )}
         </div>
 
-        {/* Footer Actions */}
-        <div className="p-4 sm:p-5 border-t border-slate-100 bg-white flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="text-xs text-slate-500">
+        {/* Footer */}
+        <div className="px-5 py-3.5 border-t border-slate-200 bg-white flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="text-xs text-slate-500 tabular-nums">
             {selectedDeletions.size > 0 ? (
-              <span>已勾選 <strong className="text-slate-900">{selectedDeletions.size}</strong> 張重複名片進行清理</span>
+              <span>
+                已標記 <strong className="text-slate-900">{selectedDeletions.size}</strong> 筆冗餘名片待清理
+              </span>
             ) : (
-              <span>無選取的重複名片</span>
+              <span>目前無選取待清理名片</span>
             )}
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto">
+          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
             {selectedDeletions.size > 0 && (
               <button
                 type="button"
                 onClick={() => onBatchDelete(Array.from(selectedDeletions))}
                 disabled={isProcessing}
-                className="flex-1 sm:flex-none px-4 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition-colors shadow-xs cursor-pointer flex items-center justify-center gap-1.5"
+                className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-semibold rounded-lg text-xs transition-colors cursor-pointer flex items-center gap-1.5 tabular-nums"
               >
-                <i className="fa-solid fa-trash-can"></i>
-                <span>刪除選取的 {selectedDeletions.size} 張</span>
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>僅刪除勾選 ({selectedDeletions.size})</span>
               </button>
             )}
 
@@ -323,13 +310,12 @@ export const DuplicateManagerModal: React.FC<DuplicateManagerModalProps> = ({
               type="button"
               onClick={onClose}
               disabled={isProcessing}
-              className="flex-1 sm:flex-none px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition-colors cursor-pointer"
+              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg text-xs transition-colors cursor-pointer"
             >
-              完成
+              關閉
             </button>
           </div>
         </div>
-
       </div>
     </div>
   );

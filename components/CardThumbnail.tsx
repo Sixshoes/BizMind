@@ -17,6 +17,7 @@ export const CardThumbnail: React.FC<CardThumbnailProps> = React.memo(({
   const [hasError, setHasError] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
 
+  // Reset error state if image URL changes
   useEffect(() => {
     setHasError(false);
     setIsLoaded(false);
@@ -24,35 +25,34 @@ export const CardThumbnail: React.FC<CardThumbnailProps> = React.memo(({
 
   const sizeClasses = {
     sm: 'w-8 h-8 text-xs',
-    md: 'w-11 h-9 text-xs',
-    lg: 'w-14 h-10 text-sm',
+    md: 'w-10 h-10 text-sm',
+    lg: 'w-12 h-12 text-base',
     custom: ''
   }[size];
 
-  const avatarGradient =
-    card.category === 'academic'
-      ? 'bg-gradient-to-br from-amber-500 to-orange-500 text-white'
-      : card.category === 'staff'
-      ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white'
-      : card.category === 'other'
-      ? 'bg-gradient-to-br from-slate-400 to-slate-500 text-white'
-      : 'bg-gradient-to-br from-indigo-500 to-blue-600 text-white';
+  const categoryBg = 
+    card.category === 'academic' ? 'bg-amber-600' :
+    card.category === 'staff' ? 'bg-emerald-600' :
+    card.category === 'other' ? 'bg-slate-500' :
+    'bg-indigo-600';
 
-  const initialText =
-    card.lastName ? card.lastName.charAt(0).toUpperCase() :
-    card.firstName ? card.firstName.charAt(0).toUpperCase() :
+  const initialText = 
+    card.lastName ? card.lastName.charAt(0) :
+    card.firstName ? card.firstName.charAt(0) :
     card.company ? card.company.charAt(0).toUpperCase() : '?';
 
-  const rotation = rotate && card.rotation ? card.rotation : 0;
+  const normalizedRot = rotate && card.rotation ? ((card.rotation % 360) + 360) % 360 : 0;
+  const rotationClass =
+    normalizedRot === 90 ? 'rotate-90' :
+    normalizedRot === 180 ? 'rotate-180' :
+    normalizedRot === 270 ? '-rotate-90' :
+    '';
+
   const showImage = Boolean(card.imageUrl && !hasError);
 
   return (
-    <div
-      className={`relative rounded-lg flex items-center justify-center font-semibold overflow-hidden border select-none shrink-0 transition-colors ${
-        showImage && isLoaded
-          ? 'bg-slate-100 border-slate-200/80 shadow-2xs'
-          : `${avatarGradient} border-black/5 shadow-2xs`
-      } ${sizeClasses} ${className}`}
+    <div 
+      className={`relative rounded-lg flex items-center justify-center font-semibold text-white overflow-hidden border border-slate-200 select-none shrink-0 ${showImage && isLoaded ? 'bg-slate-100' : categoryBg} ${sizeClasses} ${className}`}
     >
       {showImage && (
         <img
@@ -63,13 +63,13 @@ export const CardThumbnail: React.FC<CardThumbnailProps> = React.memo(({
           referrerPolicy="no-referrer"
           onError={() => setHasError(true)}
           onLoad={() => setIsLoaded(true)}
-          className={`w-full h-full object-cover transition-opacity duration-200 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
-          style={rotation ? { transform: `rotate(${rotation}deg)` } : undefined}
+          className={`w-full h-full object-contain transition-all duration-200 ${rotationClass} ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
         />
       )}
 
+      {/* Fallback avatar when no image or when image fails to load */}
       {(!showImage || !isLoaded) && (
-        <span className="absolute inset-0 flex items-center justify-center font-bold tracking-tight leading-none">
+        <span className="absolute inset-0 flex items-center justify-center font-black tracking-tight leading-none">
           {initialText}
         </span>
       )}

@@ -1,111 +1,75 @@
+import { initializeApp } from 'firebase/app';
+import { getAnalytics, isSupported } from 'firebase/analytics';
+import { getStorage, ref, uploadString, getDownloadURL, deleteObject } from 'firebase/storage';
+import { getAuth } from 'firebase/auth';
+
 const firebaseConfig = {
-  apiKey: "AIzaSyASSEW9be_Yc8VQrP-jsEOdw5DHsyoTIJM",
-  authDomain: "ecoscan-sustainable.firebaseapp.com",
-  projectId: "ecoscan-sustainable",
-  storageBucket: "ecoscan-sustainable.firebasestorage.app",
-  messagingSenderId: "139100815280",
-  appId: "1:139100815280:web:94fa177c4f325c99292075",
-  measurementId: "G-W66TPSREVJ"
+  apiKey: 'AIzaSyBNN6jJcT06JCYpSEtLCxg9g_uWM3Yir44',
+  authDomain: 'bizmind-7ff8a.firebaseapp.com',
+  projectId: 'bizmind-7ff8a',
+  storageBucket: 'bizmind-7ff8a.firebasestorage.app',
+  messagingSenderId: '813624603687',
+  appId: '1:813624603687:web:9e0c3d987cdee611ec4a02',
+  measurementId: 'G-RSPG12N1FF',
 };
 
-let storageInstancePromise: Promise<{
-  storage: any;
-  storageMod: typeof import('firebase/storage');
-}> | null = null;
+export const app = initializeApp(firebaseConfig);
+export const storage = getStorage(app);
 
-const getClientStorage = async () => {
-  if (!storageInstancePromise) {
-    storageInstancePromise = Promise.all([
-      import('firebase/app'),
-      import('firebase/storage')
-    ]).then(([appMod, storageMod]) => {
-      const app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(firebaseConfig);
-      return {
-        storage: storageMod.getStorage(app),
-        storageMod
-      };
-    });
+isSupported()
+  .then((supported) => {
+    if (supported) getAnalytics(app);
+  })
+  .catch(() => {});
+
+/**
+ * Uploads base64 image to user's private Firebase Storage path when signed in,
+ * or falls back cleanly to local data URI in Guest mode.
+ */
+export const uploadImageAsset = async (
+  base64OrUrl: string,
+  cardAssetKey: string
+): Promise<{ imageId: string; downloadUrl: string; storagePath?: string }> => {
+  const auth = getAuth(app);
+  const uid = auth.currentUser?.uid;
+
+  if (!uid || !base64OrUrl.startsWith('data:image')) {
+    return {
+      imageId: cardAssetKey,
+      downloadUrl: base64OrUrl,
+    };
   }
-  return storageInstancePromise;
+
+  const safeKey = cardAssetKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const storagePath = `users/${uid}/cards/${safeKey}.jpg`;
+  const fileRef = ref(storage, storagePath);
+  await uploadString(fileRef, base64OrUrl, 'data_url');
+  const downloadUrl = await getDownloadURL(fileRef);
+
+  return {
+    imageId: safeKey,
+    downloadUrl,
+    storagePath,
+  };
 };
 
 export const uploadImageToFirebase = async (base64Data: string, cardId: string): Promise<string> => {
-    try {
-        const response = await fetch('/api/images', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ base64: base64Data, cardId })
-        });
-        const data = await response.json();
-        if (!data.success) throw new Error(data.error);
-        return data.downloadUrl;
-    } catch (error) {
-        console.error("Server-side image upload error:", error);
-        throw error;
-    }
-};
-
-/**
- * Uploads base64 or external URL via server-side Image Service (deduplicated by SHA-256)
- */
-export const uploadImageAsset = async (base64OrUrl: string, cardId: string): Promise<{imageId: string, downloadUrl: string}> => {
-    const isBase64 = base64OrUrl.startsWith('data:image');
-    const body = isBase64 ? { base64: base64OrUrl, cardId } : { url: base64OrUrl, cardId };
-    
-    const response = await fetch('/api/images', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
-    const data = await response.json();
-    if (!data.success) throw new Error(data.error);
-    return { imageId: data.imageId, downloadUrl: data.downloadUrl };
+  const dataUri = base64Data.startsWith('data:image')
+    ? base64Data
+    : `data:image/jpeg;base64,${base64Data}`;
+  const uploaded = await uploadImageAsset(dataUri, cardId);
+  return uploaded.downloadUrl;
 };
 
 export const deleteImageFromFirebase = async (imageUrl: string): Promise<void> => {
-    if (!imageUrl || !imageUrl.includes('firebasestorage.googleapis.com')) return;
-    
-    try {
-        const decodedUrl = decodeURIComponent(imageUrl);
-        const pathMatch = decodedUrl.match(/\/o\/(.*?)\?alt=media/);
-        
-        if (pathMatch && pathMatch[1]) {
-            const filePath = pathMatch[1];
-            const { storage, storageMod } = await getClientStorage();
-            const storageRef = storageMod.ref(storage, filePath);
-            await storageMod.deleteObject(storageRef);
-            console.log("Successfully deleted image from Firebase:", filePath);
-        }
-    } catch (error) {
-        console.error("Firebase Storage delete error:", error);
+  if (!imageUrl || !imageUrl.includes('firebasestorage.googleapis.com')) return;
+  try {
+    const decodedUrl = decodeURIComponent(imageUrl);
+    const pathMatch = decodedUrl.match(/\/o\/(.*?)\?alt=media/);
+    if (pathMatch && pathMatch[1]) {
+      await deleteObject(ref(storage, pathMatch[1]));
     }
-};
-
-export const cleanupOrphanedImages = async (validImageUrls: string[]): Promise<{deleted: number, total: number}> => {
-    try {
-        const { storage, storageMod } = await getClientStorage();
-        const folderRef = storageMod.ref(storage, 'business_cards');
-        const result = await storageMod.listAll(folderRef);
-        let deletedCount = 0;
-
-        const validFilePaths = new Set(
-            validImageUrls.map(url => {
-                if (!url || !url.includes('firebasestorage.googleapis.com')) return null;
-                const decodedUrl = decodeURIComponent(url);
-                const pathMatch = decodedUrl.match(/\/o\/(.*?)\?alt=media/);
-                return pathMatch && pathMatch[1] ? pathMatch[1] : null;
-            }).filter(Boolean) as string[]
-        );
-
-        for (const itemRef of result.items) {
-            if (!validFilePaths.has(itemRef.fullPath)) {
-                await storageMod.deleteObject(itemRef);
-                deletedCount++;
-            }
-        }
-        return { deleted: deletedCount, total: result.items.length };
-    } catch (error) {
-        console.error("Firebase Storage cleanup error:", error);
-        throw error;
-    }
+  } catch {
+    // Ignore missing remote objects
+  }
 };
