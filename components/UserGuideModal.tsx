@@ -439,7 +439,8 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                   </div>
                   <div className="divide-y divide-slate-100">
                     {[
-                      { keys: ['⌘ / Ctrl', 'K'], desc: '快速切換「名片資料庫」與「審閱工作台」視圖' },
+                      { keys: ['⌘ / Ctrl', 'K'], desc: '開啟全域 Spotlight 快速搜尋與指令面板' },
+                      { keys: ['/'], desc: '在名片資料庫快速聚焦搜尋輸入框' },
                       { keys: ['J / ↓', 'K / ↑'], desc: '在審閱工作台快速切換下一張 / 上一張名片' },
                       { keys: ['1', '2', '3', '4'], desc: '一鍵切換分類：1 企業夥伴 · 2 學研專家 · 3 機關社團 · 4 一般聯絡人' },
                       { keys: ['Q'], desc: '開啟目前名片的 vCard 電子名片 QR Code' },

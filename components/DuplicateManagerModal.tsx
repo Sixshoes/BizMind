@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Layers,
   Zap,
@@ -53,6 +53,14 @@ export const DuplicateManagerModal: React.FC<DuplicateManagerModalProps> = ({
   const redundantCount = useMemo(() => {
     return groups.reduce((acc, g) => acc + (g.cards.length - 1), 0);
   }, [groups]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isProcessing) onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isProcessing, onClose]);
 
   const handleSelectKeep = (groupId: string, cardId: string) => {
     const newKeepMap = new Map(keepMap);

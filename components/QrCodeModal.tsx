@@ -112,25 +112,27 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({ card, onClose }) => {
       aria-modal="true"
     >
       <div
-        className="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-xl overflow-hidden animate-scaleUp"
+        className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden animate-scaleUp"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 border border-indigo-100 flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-800 flex items-center justify-center">
               <QrCode className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-base font-bold font-display text-slate-900">
+              <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
                 vCard 電子名片 QR Code
               </h3>
-              <p className="text-xs text-slate-600">手機相機掃描即可直接加入通訊錄</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                手機相機掃描即可直接加入通訊錄
+              </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+            className="w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center transition-colors cursor-pointer"
             aria-label="關閉"
           >
             <X className="w-4 h-4" />
@@ -138,7 +140,7 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({ card, onClose }) => {
         </div>
 
         <div className="p-6 flex flex-col items-center text-center">
-          <div className="p-3 bg-white rounded-xl border border-slate-200 shadow-xs mb-4">
+          <div className="p-3 bg-white rounded-2xl border border-slate-200 shadow-xs mb-4">
             {qrDataUrl ? (
               <img
                 src={qrDataUrl}
@@ -152,12 +154,16 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({ card, onClose }) => {
             )}
           </div>
 
-          <h4 className="text-lg font-bold font-display text-slate-900">{fullName}</h4>
+          <h4 className="text-lg font-bold font-display text-slate-900 dark:text-slate-100">
+            {fullName}
+          </h4>
           {metaParts.length > 0 && (
-            <p className="text-sm text-slate-600 mt-1 leading-relaxed">{metaParts.join(' · ')}</p>
+            <p className="text-sm text-slate-600 dark:text-slate-300 mt-1 leading-relaxed">
+              {metaParts.join(' · ')}
+            </p>
           )}
           {(card.email || card.phone) && (
-            <p className="text-sm text-slate-700 font-mono mt-2">
+            <p className="text-sm text-slate-700 dark:text-slate-300 font-mono mt-2">
               {[card.email?.split('/')[0]?.trim(), card.phone?.split('/')[0]?.trim()]
                 .filter(Boolean)
                 .join(' · ')}
@@ -165,11 +171,11 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({ card, onClose }) => {
           )}
         </div>
 
-        <div className="px-5 py-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2">
+        <div className="px-5 py-4 bg-slate-50 dark:bg-slate-900/95 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
           <button
             type="button"
             onClick={handleCopyInfo}
-            className="px-3.5 py-2 rounded-lg text-sm font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+            className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
           >
             {copiedVcard ? (
               <Check className="w-4 h-4 text-emerald-600" />
@@ -184,7 +190,7 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({ card, onClose }) => {
               type="button"
               onClick={handleDownloadPng}
               disabled={!qrDataUrl}
-              className="px-3.5 py-2 rounded-lg text-sm font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
             >
               <Download className="w-4 h-4" />
               <span>下載圖檔</span>
@@ -192,7 +198,7 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({ card, onClose }) => {
             <button
               type="button"
               onClick={handleDownloadVcf}
-              className="px-3.5 py-2 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
             >
               <UserPlus className="w-4 h-4" />
               <span>下載 .vcf</span>

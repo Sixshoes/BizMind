@@ -1,5 +1,6 @@
 import React, { ReactNode, ErrorInfo, Component } from 'react';
 import ReactDOM from 'react-dom/client';
+import { MotionConfig } from 'motion/react';
 import { AlertTriangle } from 'lucide-react';
 import './index.css';
 import App from './App';
@@ -71,11 +72,13 @@ if (!rootElement) {
     root.render(
       <React.StrictMode>
         <ErrorBoundary>
-          <ToastProvider>
-            <ConfirmDialogProvider>
-              <App />
-            </ConfirmDialogProvider>
-          </ToastProvider>
+          <MotionConfig reducedMotion="user">
+            <ToastProvider>
+              <ConfirmDialogProvider>
+                <App />
+              </ConfirmDialogProvider>
+            </ToastProvider>
+          </MotionConfig>
         </ErrorBoundary>
       </React.StrictMode>
     );

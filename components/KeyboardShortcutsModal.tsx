@@ -8,7 +8,8 @@ interface KeyboardShortcutsModalProps {
 }
 
 const SHORTCUT_ITEMS = [
-  { keys: ['⌘ / Ctrl', 'K'], desc: '快速切換「名片資料庫」與「審閱工作台」視圖' },
+  { keys: ['⌘ / Ctrl', 'K'], desc: '開啟全域 Spotlight 快速搜尋與指令面板' },
+  { keys: ['/'], desc: '在名片資料庫快速聚焦搜尋輸入框' },
   { keys: ['J', '或', '↓'], desc: '在審閱工作台切換至下一張名片' },
   { keys: ['K', '或', '↑'], desc: '在審閱工作台切換至上一張名片' },
   { keys: ['1'], desc: '將目前名片歸類為 企業夥伴 (Business)' },
@@ -45,36 +46,42 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
       aria-modal="true"
     >
       <div
-        className="bg-white w-full max-w-lg rounded-2xl border border-slate-200 shadow-xl overflow-hidden animate-scaleUp"
+        className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden animate-scaleUp"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-slate-100 text-slate-700 border border-slate-200 flex items-center justify-center shrink-0">
+            <div className="w-9 h-9 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 flex items-center justify-center shrink-0">
               <Keyboard className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-base font-bold font-display text-slate-900">鍵盤快捷鍵導覽</h3>
-              <p className="text-xs text-slate-600">未聚焦於輸入框時可直接觸發，加速大量名片審閱</p>
+              <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
+                鍵盤快捷鍵導覽
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                未聚焦於輸入框時可直接觸發，加速大量名片審閱
+              </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+            className="w-8 h-8 rounded-lg text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center transition-colors cursor-pointer"
             aria-label="關閉"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-5 divide-y divide-slate-100 max-h-[65vh] overflow-y-auto custom-scrollbar">
+        <div className="p-5 divide-y divide-slate-100 dark:divide-slate-800 max-h-[65vh] overflow-y-auto custom-scrollbar">
           {SHORTCUT_ITEMS.map((item, i) => (
             <div
               key={i}
               className="py-3 first:pt-0 last:pb-0 flex items-center justify-between gap-4"
             >
-              <span className="text-sm text-slate-800 leading-snug">{item.desc}</span>
+              <span className="text-sm text-slate-800 dark:text-slate-200 leading-snug">
+                {item.desc}
+              </span>
               <div className="flex items-center gap-1 shrink-0">
                 {item.keys.map((k, kIdx) =>
                   k === '或' ? (
@@ -84,7 +91,7 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
                   ) : (
                     <kbd
                       key={kIdx}
-                      className="px-2.5 py-1 text-xs font-mono font-semibold text-slate-800 bg-slate-100 border border-slate-300 rounded-md shadow-2xs"
+                      className="px-2.5 py-1 text-xs font-mono font-semibold text-slate-800 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md shadow-2xs"
                     >
                       {k}
                     </kbd>
@@ -96,15 +103,17 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
         </div>
 
         {onOpenUserGuide && (
-          <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
-            <span className="text-xs text-slate-600">需要了解完整工作流程與分類規範？</span>
+          <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-900/95 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+            <span className="text-xs text-slate-600 dark:text-slate-400">
+              需要了解完整工作流程與分類規範？
+            </span>
             <button
               type="button"
               onClick={() => {
                 onClose();
                 onOpenUserGuide();
               }}
-              className="text-sm font-semibold text-indigo-700 hover:text-indigo-800 hover:underline flex items-center gap-1.5 cursor-pointer"
+              className="text-sm font-semibold text-indigo-700 dark:text-indigo-400 hover:underline flex items-center gap-1.5 cursor-pointer"
             >
               <BookOpen className="w-4 h-4" />
               <span>開啟完整使用教學</span>

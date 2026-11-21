@@ -14,6 +14,7 @@ import {
   BusinessCardData,
 } from '../types';
 import { applyDualSideMerge } from '../utils/dualSideCardUtils';
+import { OrientedCardImage } from './OrientedCardImage';
 
 interface DualSideConflictModalProps {
   conflictQueue: DualSideConflictItem[];
@@ -170,14 +171,14 @@ export const DualSideConflictModal: React.FC<DualSideConflictModalProps> = ({
                 <span>正面影像 (Front)</span>
                 <span className="text-slate-400">現有主卡</span>
               </div>
-              <div className="h-40 flex items-center justify-center p-3 overflow-hidden bg-slate-950/60">
+              <div className="h-44 flex items-center justify-center overflow-hidden bg-slate-950/60">
                 {card.imageUrl ? (
-                  <img
+                  <OrientedCardImage
                     src={card.imageUrl}
                     alt="名片正面影像"
-                    referrerPolicy="no-referrer"
-                    className="max-h-full max-w-full object-contain rounded transition-transform"
-                    style={{ transform: `rotate(${card.rotation || 0}deg)` }}
+                    rotation={card.rotation || 0}
+                    padding={10}
+                    imgClassName="rounded"
                   />
                 ) : (
                   <div className="text-xs text-slate-400 flex flex-col items-center gap-1.5">
@@ -193,18 +194,14 @@ export const DualSideConflictModal: React.FC<DualSideConflictModalProps> = ({
                 <span>反面影像 (Back)</span>
                 <span className="text-amber-300">偵測到不同機構 / 對象</span>
               </div>
-              <div className="h-40 flex items-center justify-center p-3 overflow-hidden bg-slate-950/60">
+              <div className="h-44 flex items-center justify-center overflow-hidden bg-slate-950/60">
                 {card.backImageUrl ? (
-                  <img
+                  <OrientedCardImage
                     src={card.backImageUrl}
                     alt="名片反面影像"
-                    referrerPolicy="no-referrer"
-                    className="max-h-full max-w-full object-contain rounded transition-transform"
-                    style={{
-                      transform: `rotate(${
-                        extraction.recommendedBackRotation ?? card.backRotation ?? 0
-                      }deg)`,
-                    }}
+                    rotation={extraction.recommendedBackRotation ?? card.backRotation ?? 0}
+                    padding={10}
+                    imgClassName="rounded"
                   />
                 ) : (
                   <div className="text-xs text-slate-400 flex flex-col items-center gap-1.5">

@@ -96,37 +96,37 @@ export const ConfirmDialogProvider: React.FC<{ children: ReactNode }> = ({ child
           aria-labelledby="confirm-dialog-title"
         >
           <div
-            className="bg-white w-full max-w-md rounded-xl border border-slate-200 shadow-xl overflow-hidden animate-scaleUp"
+            className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden animate-scaleUp"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-5 flex items-start gap-4">
-              <div className={`w-10 h-10 rounded-lg border flex items-center justify-center shrink-0 ${variantConfig.iconBg}`}>
+              <div className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${variantConfig.iconBg}`}>
                 <IconComp className="w-5 h-5" />
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between gap-2">
-                  <h3 id="confirm-dialog-title" className="text-base font-semibold font-display text-slate-900">
+                  <h3 id="confirm-dialog-title" className="text-base font-semibold font-display text-slate-900 dark:text-slate-100">
                     {dialog.title}
                   </h3>
                   <button
                     type="button"
                     onClick={() => handleClose(false)}
-                    className="w-7 h-7 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 flex items-center justify-center transition-colors cursor-pointer"
+                    className="w-7 h-7 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center transition-colors cursor-pointer"
                     aria-label="關閉"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <p className="mt-2 text-sm text-slate-600 whitespace-pre-line leading-relaxed">
+                <p className="mt-2 text-sm text-slate-600 dark:text-slate-300 whitespace-pre-line leading-relaxed">
                   {dialog.message}
                 </p>
               </div>
             </div>
-            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2.5">
+            <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-900/95 border-t border-slate-200 dark:border-slate-800 flex items-center justify-end gap-2.5">
               <button
                 type="button"
                 onClick={() => handleClose(false)}
-                className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 transition-colors cursor-pointer whitespace-nowrap"
+                className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer whitespace-nowrap"
               >
                 {dialog.cancelLabel}
               </button>
@@ -134,7 +134,7 @@ export const ConfirmDialogProvider: React.FC<{ children: ReactNode }> = ({ child
                 type="button"
                 autoFocus
                 onClick={() => handleClose(true)}
-                className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 ${variantConfig.btn}`}
+                className={`px-4 py-2 rounded-xl text-sm font-semibold transition-colors cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 ${variantConfig.btn}`}
               >
                 {dialog.confirmLabel}
               </button>

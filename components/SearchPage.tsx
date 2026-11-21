@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { motion } from 'motion/react';
 import {
   Search,
   X,
@@ -22,12 +23,22 @@ import {
   ClipboardCheck,
   RotateCw,
   Loader2,
+  SlidersHorizontal,
+  LayoutGrid,
+  List,
+  Copy,
+  Check,
+  Upload,
+  CheckSquare,
+  ChevronDown,
 } from 'lucide-react';
 import { BusinessCardData, SearchPageState, SearchSortOption } from '../types';
 import { filterCards } from '../utils/cardFilters';
 import { normalizeCountry, getCountryBilingualLabel } from '../utils/countries';
 import { getBoundQsSubmissionList } from '../utils/qsValidation';
 import { CardThumbnail } from './CardThumbnail';
+import { OrientedCardImage } from './OrientedCardImage';
+import { useToast } from './ToastProvider';
 
 interface SearchPageProps {
   cards: BusinessCardData[];
@@ -56,9 +67,11 @@ interface SearchPageProps {
   onAutoUprightAll?: () => void;
   onBatchReorganizeDualSide?: () => void;
   onLoadDemoCards?: () => void;
+  onTriggerUpload?: () => void;
   dualSideReorgProgress?: { current: number; total: number } | null;
   isExporting?: boolean;
   isAutoUprighting?: boolean;
+  searchInputRef?: React.RefObject<HTMLInputElement | null>;
 }
 
 const HighlightText: React.FC<{ text?: string; highlight: string }> = ({ text, highlight }) => {
@@ -79,7 +92,10 @@ const HighlightText: React.FC<{ text?: string; highlight: string }> = ({ text, h
     <span>
       {parts.map((part, i) =>
         lowerTermSet.has(part.toLowerCase()) ? (
-          <mark key={i} className="bg-amber-200/90 text-slate-950 rounded-xs px-0.5 font-semibold">
+          <mark
+            key={i}
+            className="bg-amber-200/90 dark:bg-amber-500/40 text-slate-950 dark:text-amber-100 rounded-xs px-0.5 font-semibold"
+          >
             {part}
           </mark>
         ) : (
@@ -88,6 +104,13 @@ const HighlightText: React.FC<{ text?: string; highlight: string }> = ({ text, h
       )}
     </span>
   );
+};
+
+const CATEGORY_TEXT_MAP: Record<BusinessCardData['category'], string> = {
+  employer: '企業夥伴',
+  academic: '學研專家',
+  staff: '機關社團',
+  other: '一般聯絡人',
 };
 
 const SearchPage: React.FC<SearchPageProps> = React.memo(
@@ -115,10 +138,13 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
     onAutoUprightAll,
     onBatchReorganizeDualSide,
     onLoadDemoCards,
+    onTriggerUpload,
     dualSideReorgProgress = null,
     isExporting = false,
     isAutoUprighting = false,
+    searchInputRef,
   }) => {
+    const { addToast } = useToast();
     const [localState, setLocalState] = useState<SearchPageState>({
       query: '',
       sortBy: 'name_asc',
@@ -133,9 +159,32 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
       displayMode: 'table',
     });
 
+    const [showFilterPopover, setShowFilterPopover] = useState(false);
+    const [showRosterMenu, setShowRosterMenu] = useState(false);
+    const [flippedCardIds, setFlippedCardIds] = useState<Set<string>>(new Set());
+    const [copiedCardId, setCopiedCardId] = useState<string | null>(null);
+    const [renderLimit, setRenderLimit] = useState(80);
+
+    const filterPopoverRef = useRef<HTMLDivElement>(null);
+    const rosterMenuRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+      const onClickOutside = (e: MouseEvent) => {
+        if (filterPopoverRef.current && !filterPopoverRef.current.contains(e.target as Node)) {
+          setShowFilterPopover(false);
+        }
+        if (rosterMenuRef.current && !rosterMenuRef.current.contains(e.target as Node)) {
+          setShowRosterMenu(false);
+        }
+      };
+      document.addEventListener('mousedown', onClickOutside);
+      return () => document.removeEventListener('mousedown', onClickOutside);
+    }, []);
+
     const state = searchState || localState;
     const updateState = useCallback(
       (patch: Partial<SearchPageState>) => {
+        setRenderLimit(80);
         if (onSearchStateChange) {
           onSearchStateChange((prev) => ({ ...prev, ...patch }));
         } else {
@@ -164,15 +213,16 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
       [cards]
     );
 
-    const categoryCounts = useMemo(() => {
-      return {
+    const categoryCounts = useMemo(
+      () => ({
         all: cards.length,
         employer: cards.filter((c) => c.category === 'employer').length,
         academic: cards.filter((c) => c.category === 'academic').length,
         staff: cards.filter((c) => c.category === 'staff').length,
         other: cards.filter((c) => c.category === 'other').length,
-      };
-    }, [cards]);
+      }),
+      [cards]
+    );
 
     const boundQs = useMemo(() => getBoundQsSubmissionList(cards), [cards]);
 
@@ -210,6 +260,7 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
     }, [cards]);
 
     const handleResetAllFilters = useCallback(() => {
+      setRenderLimit(80);
       const resetObj: SearchPageState = {
         query: '',
         sortBy: 'name_asc',
@@ -221,45 +272,111 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
         filterCountry: 'all',
         filterTag: 'all',
         filterSource: 'all',
+        displayMode,
       };
       if (onSearchStateChange) onSearchStateChange(resetObj);
       else setLocalState(resetObj);
-    }, [onSearchStateChange]);
+    }, [onSearchStateChange, displayMode]);
 
-    const hasActiveFilters = Boolean(
-      query.trim() !== '' ||
-        filterCategory !== 'all' ||
-        filterCountry !== 'all' ||
-        (filterTag && filterTag !== 'all') ||
-        (filterSource && filterSource !== 'all') ||
-        filterHasEmail ||
-        filterHasPhone ||
-        filterHasBackImage ||
-        sortBy !== 'name_asc'
-    );
+    // Count active secondary filters for badge
+    const advancedFilterCount = useMemo(() => {
+      let count = 0;
+      if (filterCountry !== 'all') count++;
+      if (filterSource && filterSource !== 'all') count++;
+      if (filterTag && filterTag !== 'all') count++;
+      if (filterHasEmail) count++;
+      if (filterHasPhone) count++;
+      if (filterHasBackImage) count++;
+      return count;
+    }, [filterCountry, filterSource, filterTag, filterHasEmail, filterHasPhone, filterHasBackImage]);
 
-    const filteredCards = useMemo(() => {
-      return filterCards(cards, {
-        searchText: query,
-        category: filterCategory,
-        country: filterCountry,
-        tag: filterTag,
-        source: filterSource,
-        requireEmail: filterHasEmail,
-        requirePhone: filterHasPhone,
-        requireBackImage: filterHasBackImage,
-      });
+    // Active dismissible filter chips
+    const activeChips = useMemo(() => {
+      const chips: { key: string; label: string; onRemove: () => void }[] = [];
+      if (filterCountry !== 'all') {
+        chips.push({
+          key: 'country',
+          label:
+            filterCountry === '__empty__'
+              ? '未標註國家'
+              : `國家：${getCountryBilingualLabel(filterCountry)}`,
+          onRemove: () => updateState({ filterCountry: 'all' }),
+        });
+      }
+      if (filterSource && filterSource !== 'all') {
+        chips.push({
+          key: 'source',
+          label: `來源：${filterSource}`,
+          onRemove: () => updateState({ filterSource: 'all' }),
+        });
+      }
+      if (filterTag && filterTag !== 'all') {
+        chips.push({
+          key: 'tag',
+          label: `#${filterTag}`,
+          onRemove: () => updateState({ filterTag: 'all' }),
+        });
+      }
+      if (filterHasEmail) {
+        chips.push({
+          key: 'email',
+          label: '含 Email',
+          onRemove: () => updateState({ filterHasEmail: false }),
+        });
+      }
+      if (filterHasPhone) {
+        chips.push({
+          key: 'phone',
+          label: '含電話',
+          onRemove: () => updateState({ filterHasPhone: false }),
+        });
+      }
+      if (filterHasBackImage) {
+        chips.push({
+          key: 'back',
+          label: '雙面名片',
+          onRemove: () => updateState({ filterHasBackImage: false }),
+        });
+      }
+      return chips;
     }, [
-      cards,
-      query,
-      filterCategory,
       filterCountry,
-      filterTag,
       filterSource,
+      filterTag,
       filterHasEmail,
       filterHasPhone,
       filterHasBackImage,
+      updateState,
     ]);
+
+    const hasActiveFilters = Boolean(
+      query.trim() !== '' || filterCategory !== 'all' || activeChips.length > 0 || sortBy !== 'name_asc'
+    );
+
+    const filteredCards = useMemo(
+      () =>
+        filterCards(cards, {
+          searchText: query,
+          category: filterCategory,
+          country: filterCountry,
+          tag: filterTag,
+          source: filterSource,
+          requireEmail: filterHasEmail,
+          requirePhone: filterHasPhone,
+          requireBackImage: filterHasBackImage,
+        }),
+      [
+        cards,
+        query,
+        filterCategory,
+        filterCountry,
+        filterTag,
+        filterSource,
+        filterHasEmail,
+        filterHasPhone,
+        filterHasBackImage,
+      ]
+    );
 
     const sortedCards = useMemo(() => {
       return [...filteredCards].sort((a, b) => {
@@ -286,12 +403,14 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
       });
     }, [filteredCards, sortBy]);
 
+    // Windowed slice for smooth 60fps performance even with 1000+ cards
+    const renderedSlice = useMemo(() => sortedCards.slice(0, renderLimit), [sortedCards, renderLimit]);
+
     const groupedCards = useMemo<Record<string, BusinessCardData[]>>(() => {
-      if (!isGrouped || sortBy.includes('date')) return { All: sortedCards };
+      if (!isGrouped || sortBy.includes('date')) return { All: renderedSlice };
 
       const groups: Record<string, BusinessCardData[]> = {};
-
-      sortedCards.forEach((card) => {
+      renderedSlice.forEach((card) => {
         let keyChar = '';
         if (sortBy.includes('company')) {
           keyChar = card.company?.charAt(0)?.toUpperCase() || '#';
@@ -316,94 +435,51 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
       const sortedGroups: Record<string, BusinessCardData[]> = {};
       sortedKeys.forEach((k) => (sortedGroups[k] = groups[k]));
       return sortedGroups;
-    }, [sortedCards, isGrouped, sortBy]);
+    }, [renderedSlice, isGrouped, sortBy]);
+
+    const toggleFlipCard = (e: React.MouseEvent, cardId: string) => {
+      e.stopPropagation();
+      setFlippedCardIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(cardId)) next.delete(cardId);
+        else next.add(cardId);
+        return next;
+      });
+    };
+
+    const handleQuickCopyContact = async (e: React.MouseEvent, card: BusinessCardData) => {
+      e.stopPropagation();
+      const target = card.email?.split('/')[0]?.trim() || card.phone?.split('/')[0]?.trim();
+      if (!target) return;
+      try {
+        await navigator.clipboard.writeText(target);
+        setCopiedCardId(card.id);
+        addToast({ type: 'success', message: `已複製 ${target}`, duration: 2000 });
+        setTimeout(() => setCopiedCardId((cur) => (cur === card.id ? null : cur)), 1800);
+      } catch {
+        addToast({ type: 'error', message: '複製失敗' });
+      }
+    };
+
+    const allFilteredSelected =
+      filteredCards.length > 0 && filteredCards.every((c) => selectedCardIds.has(c.id));
 
     return (
-      <div className="flex flex-col h-full bg-slate-50 w-full overflow-hidden">
-        {/* Control & Filter Header */}
-        <div className="bg-white border-b border-slate-200 px-4 lg:px-6 py-3.5 flex flex-col gap-3 shrink-0 z-10">
-          {/* Row 0: Verified Contact List Direct Export & Card Auto-Upright Strip */}
-          {cards.length > 0 && (onExportBoundQsList || onReviewBoundQsList) && (
-            <div
-              id="qs-bound-banner"
-              className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 bg-indigo-50/75 border border-indigo-200 rounded-xl px-4 py-3"
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center shrink-0">
-                  <FileSpreadsheet className="w-4 h-4" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-bold text-slate-900 flex items-center gap-1.5 flex-wrap tabular-nums leading-snug">
-                    <span>完整聯絡人名冊</span>
-                    <span className="text-indigo-700">· 可匯出共 {boundQs.readyCards.length} 筆</span>
-                    <span className="text-slate-600 font-medium text-[13px]">
-                      （企業夥伴 {boundQs.employerCards.length} · 學研專家{' '}
-                      {boundQs.academicCards.length} · 機關社團 {boundQs.staffCards?.length || 0}）
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                {onAutoUprightAll && (
-                  <button
-                    type="button"
-                    disabled={isAutoUprighting}
-                    onClick={onAutoUprightAll}
-                    className="h-9 px-3 bg-white hover:bg-slate-50 disabled:opacity-50 text-slate-800 border border-slate-300 rounded-lg text-sm font-semibold transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-                    title="自動偵測並將所有橫躺或方向錯誤的名片影像翻正"
-                  >
-                    {isAutoUprighting ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
-                    ) : (
-                      <RotateCw className="w-4 h-4 text-slate-600" />
-                    )}
-                    <span>{isAutoUprighting ? '翻正處理中...' : '自動翻正名片'}</span>
-                  </button>
-                )}
-
-                {onReviewBoundQsList && (
-                  <button
-                    type="button"
-                    onClick={onReviewBoundQsList}
-                    className="h-9 px-3 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-300 rounded-lg text-sm font-semibold transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap tabular-nums"
-                  >
-                    <ClipboardCheck className="w-4 h-4" />
-                    <span>
-                      名單健檢與篩選匯出
-                      {boundQs.auditIssues.length > 0 ? ` (${boundQs.auditIssues.length} 建議)` : ''}
-                    </span>
-                  </button>
-                )}
-
-                {onExportBoundQsList && (
-                  <button
-                    type="button"
-                    disabled={isExporting || boundQs.readyCards.length === 0}
-                    onClick={onExportBoundQsList}
-                    className="h-9 px-4 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-sm font-semibold transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer whitespace-nowrap tabular-nums"
-                  >
-                    {isExporting ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <FileSpreadsheet className="w-4 h-4" />
-                    )}
-                    <span>一鍵匯出完整名冊 ({boundQs.readyCards.length} 筆 .xlsx)</span>
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Row 1: Segmented Category Tabs + Duplicate Alert */}
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
-            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl overflow-x-auto custom-scrollbar">
+      <div className="flex flex-col h-full bg-slate-50 dark:bg-slate-950 w-full overflow-hidden">
+        {/* ============================================================
+            STREAMLINED 2-ROW CONTROL HEADER (Reclaims ~40% more viewport)
+           ============================================================ */}
+        <div className="bg-white dark:bg-slate-900 border-b border-slate-200/90 dark:border-slate-800 px-4 lg:px-6 py-2.5 flex flex-col gap-2.5 shrink-0 z-10">
+          {/* Row 1: Category Segmented Tabs + Compact Roster Capsule + Duplicate Pill + View Mode */}
+          <div className="flex items-center justify-between gap-2.5 flex-wrap">
+            {/* Animated Segmented Category Tabs */}
+            <div className="flex items-center gap-0.5 bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl overflow-x-auto custom-scrollbar max-w-full">
               {[
-                { id: 'all', label: '全部名片', count: categoryCounts.all },
+                { id: 'all', label: '全部', count: categoryCounts.all },
                 { id: 'employer', label: '企業夥伴', count: categoryCounts.employer },
                 { id: 'academic', label: '學研專家', count: categoryCounts.academic },
                 { id: 'staff', label: '機關社團', count: categoryCounts.staff },
-                { id: 'other', label: '一般聯絡人', count: categoryCounts.other },
+                { id: 'other', label: '一般', count: categoryCounts.other },
               ].map((tab) => {
                 const active = filterCategory === tab.id;
                 return (
@@ -411,16 +487,25 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
                     key={tab.id}
                     type="button"
                     onClick={() => updateState({ filterCategory: tab.id as any })}
-                    className={`px-3.5 py-1.5 rounded-lg text-sm font-semibold transition-colors whitespace-nowrap flex items-center gap-1.5 cursor-pointer tabular-nums ${
+                    className={`relative px-3 py-1.5 rounded-lg text-[13px] font-semibold transition-colors whitespace-nowrap flex items-center gap-1.5 cursor-pointer tabular-nums ${
                       active
-                        ? 'bg-white text-slate-900 shadow-2xs border border-slate-200'
-                        : 'text-slate-700 hover:text-slate-950'
+                        ? 'text-slate-900 dark:text-white'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                     }`}
                   >
-                    <span>{tab.label}</span>
+                    {active && (
+                      <motion.span
+                        layoutId="search-category-pill"
+                        transition={{ type: 'spring', stiffness: 460, damping: 34 }}
+                        className="absolute inset-0 bg-white dark:bg-slate-700 rounded-lg shadow-xs border border-slate-200/80 dark:border-slate-600"
+                      />
+                    )}
+                    <span className="relative z-10">{tab.label}</span>
                     <span
-                      className={`text-xs font-bold ${
-                        active ? 'text-indigo-700' : 'text-slate-500'
+                      className={`relative z-10 text-xs font-bold ${
+                        active
+                          ? 'text-indigo-600 dark:text-indigo-300'
+                          : 'text-slate-400 dark:text-slate-500'
                       }`}
                     >
                       {tab.count}
@@ -430,332 +515,521 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
               })}
             </div>
 
-            {redundantDuplicateCount > 0 && (
-              <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-300 rounded-xl px-3.5 py-2 text-sm text-amber-950">
-                <span className="font-semibold tabular-nums">
-                  偵測到 {duplicateGroupCount} 組重複聯絡人（{redundantDuplicateCount} 筆可合併）
-                </span>
-                <div className="flex items-center gap-2 shrink-0">
+            {/* Right Status Capsules: Duplicate Alert + Verified Roster Capsule + Display Switch */}
+            <div className="flex items-center gap-2 ml-auto flex-wrap">
+              {redundantDuplicateCount > 0 && (
+                <div className="flex items-center gap-1.5 bg-amber-50 dark:bg-amber-950/50 border border-amber-300/90 dark:border-amber-800 rounded-xl pl-2.5 pr-1.5 py-1 text-xs text-amber-950 dark:text-amber-200">
+                  <span className="font-semibold tabular-nums whitespace-nowrap">
+                    {duplicateGroupCount} 組重複 ({redundantDuplicateCount})
+                  </span>
                   {onOpenDuplicateModal && (
                     <button
                       type="button"
                       onClick={onOpenDuplicateModal}
-                      className="px-3 py-1 bg-white hover:bg-amber-100 text-amber-950 border border-amber-300 font-semibold rounded-lg text-xs transition-colors cursor-pointer whitespace-nowrap"
+                      className="px-2 py-0.5 bg-white dark:bg-slate-900 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 font-semibold rounded-md transition-colors cursor-pointer whitespace-nowrap"
                     >
-                      檢視明細
+                      檢視
                     </button>
                   )}
                   {onAutoDeduplicate && (
                     <button
                       type="button"
                       onClick={onAutoDeduplicate}
-                      className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded-lg text-xs transition-colors flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                      className="px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded-md transition-colors flex items-center gap-1 cursor-pointer whitespace-nowrap"
                     >
-                      <Zap className="w-3.5 h-3.5" />
-                      <span>一鍵合併</span>
+                      <Zap className="w-3 h-3" />
+                      <span>合併</span>
                     </button>
                   )}
                 </div>
-              </div>
-            )}
-          </div>
-
-          {/* Row 2: Search Input + Multi-Dimensional Filters */}
-          <div
-            id="search-filter-bar"
-            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2.5"
-          >
-            {/* Search Input */}
-            <div className="relative sm:col-span-2 lg:col-span-4">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-              <input
-                type="text"
-                className="w-full pl-9 pr-8 py-2 bg-white border border-slate-300 hover:border-slate-400 rounded-lg focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 outline-none transition-colors text-sm text-slate-900 placeholder:text-slate-500"
-                placeholder="搜尋姓名、公司、職稱、Email、標籤或摘要..."
-                value={query}
-                onChange={(e) => updateState({ query: e.target.value })}
-              />
-              {query && (
-                <button
-                  type="button"
-                  onClick={() => updateState({ query: '' })}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 cursor-pointer"
-                  title="清除關鍵字"
-                >
-                  <X className="w-4 h-4" />
-                </button>
               )}
-            </div>
 
-            {/* Country Filter */}
-            <div className="relative lg:col-span-2">
-              <Globe className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
-              <select
-                value={filterCountry}
-                onChange={(e) => updateState({ filterCountry: e.target.value })}
-                className={`w-full pl-9 pr-6 py-2 border rounded-lg text-sm font-medium outline-none cursor-pointer transition-colors ${
-                  filterCountry !== 'all'
-                    ? 'bg-indigo-50 border-indigo-400 text-indigo-800 font-semibold'
-                    : 'bg-white border-slate-300 text-slate-800 hover:border-slate-400'
-                }`}
-              >
-                <option value="all">國家：全部 ({cards.length})</option>
-                {countryStats.list.map(([countryName, count]) => (
-                  <option key={countryName} value={countryName}>
-                    {getCountryBilingualLabel(countryName)} ({count})
-                  </option>
-                ))}
-                {countryStats.emptyCount > 0 && (
-                  <option value="__empty__">未標註國家 ({countryStats.emptyCount})</option>
-                )}
-              </select>
-            </div>
+              {/* Compact Verified Roster & Maintenance Pill (replaces tall Row 0 banner) */}
+              {cards.length > 0 && (onExportBoundQsList || onReviewBoundQsList) && (
+                <div className="relative" ref={rosterMenuRef} id="qs-bound-banner">
+                  <div className="inline-flex items-center rounded-xl border border-indigo-200/90 dark:border-indigo-800/80 bg-indigo-50/75 dark:bg-indigo-950/45 overflow-hidden">
+                    {onExportBoundQsList && (
+                      <button
+                        type="button"
+                        disabled={isExporting || boundQs.readyCards.length === 0}
+                        onClick={onExportBoundQsList}
+                        className="h-8 px-3 text-xs font-bold text-indigo-800 dark:text-indigo-200 hover:bg-indigo-100/80 dark:hover:bg-indigo-900/60 disabled:opacity-50 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap tabular-nums"
+                        title={`一鍵匯出完整名冊（企業 ${boundQs.employerCards.length} · 學研 ${boundQs.academicCards.length} · 社團 ${boundQs.staffCards?.length || 0}）`}
+                      >
+                        {isExporting ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                        )}
+                        <span>匯出完整名冊 ({boundQs.readyCards.length})</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setShowRosterMenu((p) => !p)}
+                      className="h-8 px-2 border-l border-indigo-200/80 dark:border-indigo-800/80 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100/80 dark:hover:bg-indigo-900/60 flex items-center justify-center cursor-pointer transition-colors"
+                      title="名單健檢與資料整理工具"
+                      aria-label="名單健檢與資料整理工具"
+                    >
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
 
-            {/* Source Filter */}
-            <div className="relative lg:col-span-2">
-              <Award className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
-              <select
-                value={filterSource}
-                onChange={(e) => updateState({ filterSource: e.target.value })}
-                className={`w-full pl-9 pr-6 py-2 border rounded-lg text-sm font-medium outline-none cursor-pointer transition-colors ${
-                  filterSource !== 'all'
-                    ? 'bg-indigo-50 border-indigo-400 text-indigo-800 font-semibold'
-                    : 'bg-white border-slate-300 text-slate-800 hover:border-slate-400'
-                }`}
-              >
-                <option value="all">活動來源：全部</option>
-                {sourceStats.map(([src, count]) => (
-                  <option key={src} value={src}>
-                    {src} ({count})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Tag Filter */}
-            <div className="relative lg:col-span-2">
-              <Tag className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
-              <select
-                value={filterTag}
-                onChange={(e) => updateState({ filterTag: e.target.value })}
-                className={`w-full pl-9 pr-6 py-2 border rounded-lg text-sm font-medium outline-none cursor-pointer transition-colors ${
-                  filterTag !== 'all'
-                    ? 'bg-indigo-50 border-indigo-400 text-indigo-800 font-semibold'
-                    : 'bg-white border-slate-300 text-slate-800 hover:border-slate-400'
-                }`}
-              >
-                <option value="all">自訂標籤：全部</option>
-                {tagStats.map(([tag, count]) => (
-                  <option key={tag} value={tag}>
-                    {tag} ({count})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Sort Option */}
-            <div className="relative lg:col-span-2">
-              <ArrowUpDown className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
-              <select
-                value={sortBy}
-                onChange={(e) => updateState({ sortBy: e.target.value as SearchSortOption })}
-                className="w-full pl-9 pr-6 py-2 bg-white border border-slate-300 hover:border-slate-400 rounded-lg text-sm font-medium text-slate-800 outline-none cursor-pointer"
-              >
-                <option value="name_asc">排序：姓名 (A–Z)</option>
-                <option value="name_desc">排序：姓名 (Z–A)</option>
-                <option value="company_asc">排序：公司 (A–Z)</option>
-                <option value="date_desc">排序：最新掃描優先</option>
-                <option value="date_asc">排序：最早掃描優先</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Row 3: Quick Toggles & Selection Controls */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => updateState({ isGrouped: !isGrouped })}
-                disabled={sortBy.includes('date')}
-                className={`px-3 py-1.5 rounded-lg text-[13px] font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-40 ${
-                  isGrouped && !sortBy.includes('date')
-                    ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                <Layers className="w-3.5 h-3.5" />
-                <span>字母分組</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => updateState({ filterHasEmail: !filterHasEmail })}
-                className={`px-3 py-1.5 rounded-lg text-[13px] font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                  filterHasEmail
-                    ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                <Mail className="w-3.5 h-3.5" />
-                <span>含 Email</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => updateState({ filterHasPhone: !filterHasPhone })}
-                className={`px-3 py-1.5 rounded-lg text-[13px] font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                  filterHasPhone
-                    ? 'bg-blue-50 border-blue-300 text-blue-800'
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                <Phone className="w-3.5 h-3.5" />
-                <span>含電話</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => updateState({ filterHasBackImage: !filterHasBackImage })}
-                className={`px-3 py-1.5 rounded-lg text-[13px] font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap tabular-nums ${
-                  filterHasBackImage
-                    ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                }`}
-                title="僅顯示已上傳正反雙面影像的名片"
-              >
-                <FlipHorizontal2 className="w-3.5 h-3.5" />
-                <span>雙面名片 ({dualSideCount})</span>
-              </button>
-
-              {dualSideCount > 0 && onBatchReorganizeDualSide && (
-                <button
-                  type="button"
-                  disabled={Boolean(dualSideReorgProgress)}
-                  onClick={onBatchReorganizeDualSide}
-                  className="px-3 py-1.5 rounded-lg text-[13px] font-semibold bg-white hover:bg-indigo-50 text-indigo-800 border border-indigo-200 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap tabular-nums disabled:opacity-60"
-                  title="批次比對所有雙面名片：英文自動升主欄、中文存對照、斜線整合職稱，並彙整跨機構差異供確認"
-                >
-                  {dualSideReorgProgress ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
-                  ) : (
-                    <FlipHorizontal2 className="w-3.5 h-3.5 text-indigo-600" />
+                  {showRosterMenu && (
+                    <div className="absolute right-0 top-full mt-1.5 w-68 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-fadeIn">
+                      <div className="px-3.5 py-1.5 border-b border-slate-100 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                        完整名單：企業 {boundQs.employerCards.length} · 學研{' '}
+                        {boundQs.academicCards.length} · 社團 {boundQs.staffCards?.length || 0}
+                      </div>
+                      {onReviewBoundQsList && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowRosterMenu(false);
+                            onReviewBoundQsList();
+                          }}
+                          className="w-full text-left px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 flex items-center justify-between cursor-pointer"
+                        >
+                          <span className="flex items-center gap-2">
+                            <ClipboardCheck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                            <span>名單健檢與篩選匯出</span>
+                          </span>
+                          {boundQs.auditIssues.length > 0 && (
+                            <span className="text-[11px] font-bold text-amber-600 dark:text-amber-400">
+                              {boundQs.auditIssues.length} 建議
+                            </span>
+                          )}
+                        </button>
+                      )}
+                      {onAutoUprightAll && (
+                        <button
+                          type="button"
+                          disabled={isAutoUprighting}
+                          onClick={() => {
+                            setShowRosterMenu(false);
+                            onAutoUprightAll();
+                          }}
+                          className="w-full text-left px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                        >
+                          {isAutoUprighting ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                          ) : (
+                            <RotateCw className="w-3.5 h-3.5 text-slate-500" />
+                          )}
+                          <span>{isAutoUprighting ? '翻正處理中...' : '自動翻正全部名片影像'}</span>
+                        </button>
+                      )}
+                      {dualSideCount > 0 && onBatchReorganizeDualSide && (
+                        <button
+                          type="button"
+                          disabled={Boolean(dualSideReorgProgress)}
+                          onClick={() => {
+                            setShowRosterMenu(false);
+                            onBatchReorganizeDualSide();
+                          }}
+                          className="w-full text-left px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between cursor-pointer disabled:opacity-50"
+                        >
+                          <span className="flex items-center gap-2">
+                            {dualSideReorgProgress ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                            ) : (
+                              <FlipHorizontal2 className="w-3.5 h-3.5 text-slate-500" />
+                            )}
+                            <span>
+                              {dualSideReorgProgress
+                                ? `雙面重整 (${dualSideReorgProgress.current}/${dualSideReorgProgress.total})`
+                                : '批次雙面重整'}
+                            </span>
+                          </span>
+                          <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 tabular-nums">
+                            {dualSideCount}
+                          </span>
+                        </button>
+                      )}
+                      {onStandardizeCountries && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowRosterMenu(false);
+                            onStandardizeCountries();
+                          }}
+                          className="w-full text-left px-3.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 cursor-pointer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-slate-500" />
+                          <span>標準化 197 國別名稱</span>
+                        </button>
+                      )}
+                    </div>
                   )}
-                  <span>
-                    {dualSideReorgProgress
-                      ? `雙面重整中 (${dualSideReorgProgress.current}/${dualSideReorgProgress.total})`
-                      : '批次雙面重整'}
-                  </span>
-                </button>
+                </div>
               )}
 
-              {onStandardizeCountries && (
-                <button
-                  type="button"
-                  onClick={onStandardizeCountries}
-                  className="px-3 py-1.5 rounded-lg text-[13px] font-semibold bg-white hover:bg-indigo-50 text-slate-700 hover:text-indigo-800 border border-slate-300 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-                  title="將所有名片國家名稱統一為標準 197 國格式"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                  <span>標準化國家名稱</span>
-                </button>
-              )}
-
-              {hasActiveFilters && (
-                <button
-                  type="button"
-                  onClick={handleResetAllFilters}
-                  className="px-3 py-1.5 rounded-lg text-[13px] font-semibold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>重設篩選</span>
-                </button>
-              )}
-
-              <div className="h-4 w-px bg-slate-300 mx-1 hidden sm:block" />
-
-              <button
-                type="button"
-                onClick={() => onSelectBatch?.(filteredCards.map((c) => c.id))}
-                className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-[13px] font-semibold rounded-lg border border-slate-300 transition-colors cursor-pointer whitespace-nowrap tabular-nums"
-              >
-                全選目前結果 ({filteredCards.length})
-              </button>
-
-              {selectedCardIds.size > 0 && (
-                <button
-                  type="button"
-                  onClick={() => onDeselectAll?.()}
-                  className="px-2.5 py-1.5 text-slate-600 hover:text-rose-700 text-[13px] font-semibold transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  取消選取
-                </button>
-              )}
-            </div>
-
-            <div className="flex items-center gap-3 ml-auto">
-              <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+              {/* View Mode Segmented Switch (Desktop/Tablet) */}
+              <div className="hidden sm:flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700">
                 <button
                   type="button"
                   onClick={() => updateState({ displayMode: 'table' })}
-                  className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
                     displayMode === 'table'
-                      ? 'bg-white text-slate-900 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                      ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                   }`}
+                  title="表格清單檢視"
                 >
-                  表格清單
+                  <List className="w-3.5 h-3.5" />
+                  <span>清單</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => updateState({ displayMode: 'grid' })}
-                  className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
                     displayMode === 'grid'
-                      ? 'bg-white text-slate-900 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                      ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                   }`}
+                  title="名片卡片牆檢視"
                 >
-                  卡片牆
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  <span>卡片牆</span>
                 </button>
-              </div>
-              <div className="text-sm font-medium text-slate-600 tabular-nums whitespace-nowrap">
-                顯示 <strong className="text-slate-900 font-bold">{filteredCards.length}</strong> /{' '}
-                {cards.length} 筆
               </div>
             </div>
           </div>
-        </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 lg:p-6 custom-scrollbar relative">
-          {cards.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto px-4">
-              <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mb-3.5">
-                <Sparkles className="w-6 h-6" />
-              </div>
-              <h3 className="text-base font-bold text-slate-900 mb-1.5">尚無名片資料</h3>
-              <p className="text-sm text-slate-600 leading-relaxed mb-5">
-                點擊右上角「新增名片」上傳圖檔或 PDF，或直接載入示範名片快速體驗雙面合併、AI 問候信與無紙化電子名片交換。
-              </p>
-              {onLoadDemoCards && (
+          {/* Row 2: Wide Search Input + Filter Popover + Sort + Select All + Result Counter */}
+          <div id="search-filter-bar" className="flex items-center gap-2 flex-wrap">
+            {/* Search Input */}
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                className="w-full h-9 pl-9 pr-14 bg-slate-50/70 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 rounded-xl focus:bg-white dark:focus:bg-slate-900 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-colors text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                placeholder="搜尋姓名、公司、職稱、Email、標籤或摘要..."
+                value={query}
+                onChange={(e) => updateState({ query: e.target.value })}
+              />
+              {query ? (
                 <button
                   type="button"
-                  onClick={onLoadDemoCards}
-                  className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold transition-colors flex items-center gap-2 cursor-pointer shadow-xs"
+                  onClick={() => updateState({ query: '' })}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                  title="清除關鍵字"
                 >
-                  <Sparkles className="w-4 h-4" />
-                  <span>載入 6 筆示範名片體驗功能</span>
+                  <X className="w-4 h-4" />
                 </button>
+              ) : (
+                <kbd className="hidden md:inline-flex absolute right-2.5 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-slate-400 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded pointer-events-none">
+                  /
+                </kbd>
               )}
             </div>
+
+            {/* Multi-Dimensional Filter Popover */}
+            <div className="relative" ref={filterPopoverRef}>
+              <button
+                type="button"
+                onClick={() => setShowFilterPopover((p) => !p)}
+                className={`h-9 px-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                  advancedFilterCount > 0 || showFilterPopover
+                    ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-300 dark:border-indigo-700 text-indigo-800 dark:text-indigo-200'
+                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>條件篩選</span>
+                {advancedFilterCount > 0 && (
+                  <span className="px-1.5 py-0.5 bg-indigo-600 text-white rounded-full text-[11px] font-bold leading-none tabular-nums">
+                    {advancedFilterCount}
+                  </span>
+                )}
+              </button>
+
+              {showFilterPopover && (
+                <div className="absolute right-0 sm:left-0 sm:right-auto top-full mt-1.5 w-[310px] sm:w-[360px] bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-4 z-50 space-y-3.5 animate-fadeIn">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                      多維度篩選條件
+                    </span>
+                    {advancedFilterCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateState({
+                            filterCountry: 'all',
+                            filterSource: 'all',
+                            filterTag: 'all',
+                            filterHasEmail: false,
+                            filterHasPhone: false,
+                            filterHasBackImage: false,
+                          })
+                        }
+                        className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
+                      >
+                        重設條件
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Country */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                      <Globe className="w-3 h-3" /> 國家 / 地區
+                    </label>
+                    <select
+                      value={filterCountry}
+                      onChange={(e) => updateState({ filterCountry: e.target.value })}
+                      className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-medium text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
+                    >
+                      <option value="all">全部國家 ({cards.length})</option>
+                      {countryStats.list.map(([countryName, count]) => (
+                        <option key={countryName} value={countryName}>
+                          {getCountryBilingualLabel(countryName)} ({count})
+                        </option>
+                      ))}
+                      {countryStats.emptyCount > 0 && (
+                        <option value="__empty__">未標註國家 ({countryStats.emptyCount})</option>
+                      )}
+                    </select>
+                  </div>
+
+                  {/* Source */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                      <Award className="w-3 h-3" /> 活動 / 展會來源
+                    </label>
+                    <select
+                      value={filterSource}
+                      onChange={(e) => updateState({ filterSource: e.target.value })}
+                      className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-medium text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
+                    >
+                      <option value="all">全部來源</option>
+                      {sourceStats.map(([src, count]) => (
+                        <option key={src} value={src}>
+                          {src} ({count})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Tag */}
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                      <Tag className="w-3 h-3" /> 自訂標籤
+                    </label>
+                    <select
+                      value={filterTag}
+                      onChange={(e) => updateState({ filterTag: e.target.value })}
+                      className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-medium text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
+                    >
+                      <option value="all">全部標籤</option>
+                      {tagStats.map(([tag, count]) => (
+                        <option key={tag} value={tag}>
+                          #{tag} ({count})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Quick Boolean Toggles */}
+                  <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => updateState({ filterHasEmail: !filterHasEmail })}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors flex items-center gap-1 cursor-pointer ${
+                        filterHasEmail
+                          ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200'
+                          : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      <Mail className="w-3 h-3" />
+                      <span>含 Email</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateState({ filterHasPhone: !filterHasPhone })}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors flex items-center gap-1 cursor-pointer ${
+                        filterHasPhone
+                          ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-300 dark:border-blue-700 text-blue-800 dark:text-blue-200'
+                          : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      <Phone className="w-3 h-3" />
+                      <span>含電話</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateState({ filterHasBackImage: !filterHasBackImage })}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors flex items-center gap-1 cursor-pointer tabular-nums ${
+                        filterHasBackImage
+                          ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-300 dark:border-indigo-700 text-indigo-800 dark:text-indigo-200'
+                          : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      <FlipHorizontal2 className="w-3 h-3" />
+                      <span>雙面 ({dualSideCount})</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={sortBy.includes('date')}
+                      onClick={() => updateState({ isGrouped: !isGrouped })}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-40 ${
+                        isGrouped && !sortBy.includes('date')
+                          ? 'bg-slate-900 dark:bg-slate-100 border-slate-900 dark:border-slate-100 text-white dark:text-slate-900'
+                          : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      <Layers className="w-3 h-3" />
+                      <span>字母分組</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Sort Select */}
+            <div className="relative">
+              <ArrowUpDown className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              <select
+                value={sortBy}
+                onChange={(e) => updateState({ sortBy: e.target.value as SearchSortOption })}
+                className="h-9 pl-8 pr-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-200 outline-none cursor-pointer"
+                aria-label="排序方式"
+              >
+                <option value="name_asc">姓名 (A–Z)</option>
+                <option value="name_desc">姓名 (Z–A)</option>
+                <option value="company_asc">公司 (A–Z)</option>
+                <option value="date_desc">最新掃描</option>
+                <option value="date_asc">最早掃描</option>
+              </select>
+            </div>
+
+            {/* Select All / Clear Selection */}
+            {filteredCards.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  allFilteredSelected
+                    ? onDeselectAll?.()
+                    : onSelectBatch?.(filteredCards.map((c) => c.id))
+                }
+                className={`h-9 px-3 rounded-xl text-xs font-semibold border transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap tabular-nums ${
+                  allFilteredSelected
+                    ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-200'
+                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <CheckSquare className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">
+                  {allFilteredSelected ? '取消全選' : `全選 (${filteredCards.length})`}
+                </span>
+              </button>
+            )}
+
+            <div className="text-xs font-medium text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap ml-auto hidden lg:block">
+              顯示 <strong className="text-slate-900 dark:text-slate-100">{filteredCards.length}</strong> /{' '}
+              {cards.length} 筆
+            </div>
+          </div>
+
+          {/* Conditional Dismissible Filter Chips Strip (only appears when secondary filters active) */}
+          {activeChips.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-100 dark:border-slate-800">
+              <span className="text-[11px] font-semibold text-slate-400">已套用篩選：</span>
+              {activeChips.map((chip) => (
+                <button
+                  key={chip.key}
+                  type="button"
+                  onClick={chip.onRemove}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 dark:bg-indigo-950/70 text-indigo-700 dark:text-indigo-200 border border-indigo-200/80 dark:border-indigo-800 hover:bg-rose-50 dark:hover:bg-rose-950/50 hover:text-rose-700 dark:hover:text-rose-300 hover:border-rose-200 transition-colors cursor-pointer"
+                >
+                  <span>{chip.label}</span>
+                  <X className="w-3 h-3" />
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={handleResetAllFilters}
+                className="text-xs font-semibold text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 px-1.5 py-0.5 cursor-pointer"
+              >
+                全部清除
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* ============================================================
+            CONTENT AREA (Windowed Scroll + Responsive Grid / Table)
+           ============================================================ */}
+        <div
+          className="flex-1 overflow-y-auto p-4 lg:p-6 custom-scrollbar relative"
+          onScroll={(e) => {
+            const target = e.currentTarget;
+            if (target.scrollTop + target.clientHeight >= target.scrollHeight - 300) {
+              if (renderLimit < sortedCards.length) {
+                setRenderLimit((prev) => Math.min(sortedCards.length, prev + 80));
+              }
+            }
+          }}
+        >
+          {cards.length === 0 ? (
+            /* Actionable Empty State with Direct Upload Dropzone */
+            <div className="h-full flex flex-col items-center justify-center text-center max-w-lg mx-auto px-4">
+              <div
+                onClick={onTriggerUpload}
+                className={`w-full rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900/70 p-8 sm:p-10 transition-colors ${
+                  onTriggerUpload
+                    ? 'hover:border-indigo-400 dark:hover:border-indigo-500 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 cursor-pointer'
+                    : ''
+                }`}
+              >
+                <div className="w-14 h-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-100 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto mb-4 shadow-2xs">
+                  <Upload className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg font-bold font-display text-slate-900 dark:text-slate-100 mb-2">
+                  開始建立您的智慧人脈庫
+                </h3>
+                <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed mb-6">
+                  直接拖曳名片照片 (JPG / PNG) 或多頁掃描 PDF 至此處，AI 將自動完成多卡框選、方向翻正、雙語對照與分類整理。
+                </p>
+                <div
+                  className="flex items-center justify-center gap-2.5 flex-wrap"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {onTriggerUpload && (
+                    <button
+                      type="button"
+                      onClick={onTriggerUpload}
+                      className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold transition-colors flex items-center gap-2 cursor-pointer shadow-xs"
+                    >
+                      <Upload className="w-4 h-4" />
+                      <span>選擇名片或 PDF</span>
+                    </button>
+                  )}
+                  {onLoadDemoCards && (
+                    <button
+                      type="button"
+                      onClick={onLoadDemoCards}
+                      className="px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 text-slate-800 dark:text-slate-200 hover:text-indigo-700 dark:hover:text-indigo-300 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-2 cursor-pointer"
+                    >
+                      <Sparkles className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                      <span>載入 6 筆示範名片</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           ) : filteredCards.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-500">
+            <div className="h-full flex flex-col items-center justify-center text-slate-500 dark:text-slate-400">
               <FilterX className="w-11 h-11 mb-3 text-slate-400" />
-              <p className="text-base font-semibold text-slate-700">沒有找到符合篩選條件的名片</p>
+              <p className="text-base font-semibold text-slate-700 dark:text-slate-200">
+                沒有找到符合篩選條件的名片
+              </p>
               {hasActiveFilters && (
                 <button
                   type="button"
                   onClick={handleResetAllFilters}
-                  className="mt-3.5 px-4 py-2.5 bg-indigo-50 text-indigo-700 rounded-lg text-sm font-semibold hover:bg-indigo-100 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  className="mt-3.5 px-4 py-2 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 rounded-xl text-sm font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <RotateCcw className="w-4 h-4" />
                   <span>重設所有篩選條件</span>
@@ -763,459 +1037,547 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
               )}
             </div>
           ) : (
-            <div className="space-y-6 pb-20">
+            <div className="space-y-6 pb-24">
               {Object.entries(groupedCards).map(
                 ([groupTitle, groupItems]: [string, BusinessCardData[]]) => (
                   <div key={groupTitle}>
                     {isGrouped && !sortBy.includes('date') && (
                       <div className="flex items-center gap-3 mb-3">
-                        <span className="text-sm font-bold font-display text-indigo-800 bg-indigo-50 border border-indigo-200 px-3 py-1 rounded-lg">
+                        <span className="text-xs font-bold font-display text-indigo-800 dark:text-indigo-200 bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200/80 dark:border-indigo-800 px-2.5 py-0.5 rounded-lg">
                           {groupTitle}
                         </span>
-                        <div className="h-px bg-slate-200 flex-1" />
-                        <span className="text-sm font-medium text-slate-600 tabular-nums">
+                        <div className="h-px bg-slate-200/80 dark:bg-slate-800 flex-1" />
+                        <span className="text-xs font-medium text-slate-500 dark:text-slate-400 tabular-nums">
                           {groupItems.length} 筆
                         </span>
                       </div>
                     )}
 
-                    {displayMode === 'grid' ? (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                        {groupItems.map((card) => {
-                          const isSelected = selectedCardIds.has(card.id);
-                          const displayCtry = normalizeCountry(
-                            card.country || card.translations?.country || ''
-                          );
-                          const displayName =
-                            card.firstName || card.lastName
-                              ? `${card.lastName || ''} ${card.firstName || ''}`.trim()
-                              : card.company || '未命名名片';
-                          const primaryEmail = card.email
-                            ? String(card.email).split('/')[0].trim()
-                            : '';
+                    {/* Card Wall View (also auto-used on small mobile screens < 640px) */}
+                    <div
+                      className={
+                        displayMode === 'grid'
+                          ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4'
+                          : 'grid grid-cols-1 gap-3 sm:hidden'
+                      }
+                    >
+                      {groupItems.map((card) => {
+                        const isSelected = selectedCardIds.has(card.id);
+                        const isFlipped = flippedCardIds.has(card.id);
+                        const displayCtry = normalizeCountry(
+                          card.country || card.translations?.country || ''
+                        );
+                        const displayName =
+                          card.firstName || card.lastName
+                            ? `${card.lastName || ''} ${card.firstName || ''}`.trim()
+                            : card.company || '未命名名片';
+                        const primaryEmail = card.email
+                          ? String(card.email).split('/')[0].trim()
+                          : '';
+                        const primaryPhone = card.phone
+                          ? String(card.phone).split('/')[0].trim()
+                          : '';
 
-                          return (
-                            <div
-                              key={card.id}
-                              onClick={() => onSelectCard(card.id)}
-                              className={`group bg-white rounded-2xl border transition-all cursor-pointer flex flex-col overflow-hidden ${
-                                isSelected
-                                  ? 'border-indigo-500 ring-2 ring-indigo-500/15 shadow-sm'
-                                  : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'
-                              }`}
-                            >
-                              <div className="relative aspect-[16/10] bg-slate-100 border-b border-slate-100 overflow-hidden flex items-center justify-center">
-                                {card.imageUrl ? (
-                                  <img
-                                    src={card.imageUrl}
-                                    alt={displayName}
-                                    loading="lazy"
-                                    className="w-full h-full object-contain p-2"
-                                    style={
-                                      card.rotation
-                                        ? { transform: `rotate(${card.rotation}deg)` }
-                                        : undefined
-                                    }
-                                  />
-                                ) : (
-                                  <div className="w-full h-full bg-gradient-to-br from-slate-50 via-white to-indigo-50/60 p-4 flex flex-col justify-between">
-                                    <span className="text-[11px] font-semibold text-slate-400 truncate">
-                                      {card.company || 'BizMind Contact'}
-                                    </span>
-                                    <div>
-                                      <div className="text-base font-bold text-slate-900 truncate">
-                                        {displayName}
-                                      </div>
-                                      <div className="text-xs text-slate-500 truncate">
-                                        {card.title || ''}
+                        return (
+                          <div
+                            key={card.id}
+                            onClick={() => onSelectCard(card.id)}
+                            className={`group bg-white dark:bg-slate-900 rounded-2xl border transition-all duration-200 cursor-pointer flex flex-col overflow-hidden hover:-translate-y-0.5 ${
+                              isSelected
+                                ? 'border-indigo-500 ring-2 ring-indigo-500/20 shadow-md'
+                                : 'border-slate-200/90 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 hover:shadow-md'
+                            }`}
+                          >
+                            {/* 3D Flip-capable Business Card Image Stage */}
+                            <div className="relative aspect-[1.6/1] bg-slate-100 dark:bg-slate-800/80 border-b border-slate-100 dark:border-slate-800 overflow-hidden perspective-1000">
+                              <div
+                                className={`relative w-full h-full preserve-3d transition-transform duration-500 ${
+                                  isFlipped ? 'rotate-y-180' : ''
+                                }`}
+                              >
+                                {/* Front Face */}
+                                <div className="absolute inset-0 backface-hidden">
+                                  {card.imageUrl ? (
+                                    <OrientedCardImage
+                                      src={card.imageUrl}
+                                      alt={displayName}
+                                      rotation={card.rotation || 0}
+                                      padding={10}
+                                    />
+                                  ) : (
+                                    <div className="w-full h-full bg-gradient-to-br from-slate-50 via-white to-indigo-50/70 dark:from-slate-800 dark:via-slate-900 dark:to-indigo-950/60 p-4 flex flex-col justify-between">
+                                      <span className="text-[11px] font-semibold text-slate-400 truncate">
+                                        {card.company || 'BizMind Contact'}
+                                      </span>
+                                      <div>
+                                        <div className="text-base font-bold text-slate-900 dark:text-slate-100 truncate">
+                                          {displayName}
+                                        </div>
+                                        <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                                          {card.title || ''}
+                                        </div>
                                       </div>
                                     </div>
+                                  )}
+                                </div>
+
+                                {/* Back Face (when dual-side) */}
+                                {card.backImageUrl && (
+                                  <div className="absolute inset-0 backface-hidden rotate-y-180 bg-slate-900">
+                                    <OrientedCardImage
+                                      src={card.backImageUrl}
+                                      alt={`${displayName} 反面`}
+                                      rotation={card.backRotation || 0}
+                                      padding={10}
+                                    />
                                   </div>
                                 )}
-
-                                <div
-                                  className="absolute top-2.5 left-2.5 z-10 bg-white/90 rounded-lg p-1 border border-slate-200"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onToggleCard?.(card.id);
-                                  }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => onToggleCard?.(card.id)}
-                                    className="w-4 h-4 rounded border-slate-300 text-indigo-600 cursor-pointer accent-indigo-600 block"
-                                  />
-                                </div>
-
-                                <div className="absolute top-2.5 right-2.5 z-10 flex items-center gap-1">
-                                  {card.backImageUrl && (
-                                    <span
-                                      className="px-1.5 py-0.5 rounded bg-slate-900/75 text-white text-[10px] font-semibold"
-                                      title="雙面名片"
-                                    >
-                                      雙面
-                                    </span>
-                                  )}
-                                  <span
-                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-md border ${
-                                      card.category === 'academic'
-                                        ? 'bg-amber-50/95 text-amber-900 border-amber-300'
-                                        : card.category === 'staff'
-                                        ? 'bg-emerald-50/95 text-emerald-900 border-emerald-300'
-                                        : card.category === 'other'
-                                        ? 'bg-slate-100/95 text-slate-700 border-slate-300'
-                                        : 'bg-blue-50/95 text-blue-900 border-blue-300'
-                                    }`}
-                                  >
-                                    {card.category === 'employer'
-                                      ? '企業夥伴'
-                                      : card.category === 'academic'
-                                      ? '學研專家'
-                                      : card.category === 'staff'
-                                      ? '機關社團'
-                                      : '一般聯絡人'}
-                                  </span>
-                                </div>
                               </div>
 
-                              <div className="p-4 flex-1 flex flex-col justify-between gap-3">
-                                <div>
-                                  <div className="flex items-center justify-between gap-2">
-                                    <h4 className="text-base font-bold text-slate-900 truncate">
-                                      <HighlightText text={displayName} highlight={query} />
-                                    </h4>
-                                    {displayCtry && (
-                                      <span className="text-xs text-slate-500 shrink-0">
-                                        {displayCtry}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="text-sm font-medium text-slate-700 truncate mt-0.5">
-                                    <HighlightText text={card.company} highlight={query} />
-                                  </div>
-                                  {card.title && (
-                                    <div className="text-xs text-slate-500 truncate mt-0.5">
-                                      <HighlightText text={card.title} highlight={query} />
-                                    </div>
-                                  )}
-                                  {card.summary && (
-                                    <p className="mt-2 text-xs text-slate-600 line-clamp-2 leading-relaxed">
-                                      <HighlightText text={card.summary} highlight={query} />
-                                    </p>
+                              {/* Checkbox Top-Left */}
+                              <div
+                                className="absolute top-2.5 left-2.5 z-10 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xs rounded-lg p-1 border border-slate-200 dark:border-slate-700 shadow-2xs"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onToggleCard?.(card.id);
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => onToggleCard?.(card.id)}
+                                  className="w-4 h-4 rounded border-slate-300 text-indigo-600 cursor-pointer accent-indigo-600 block"
+                                />
+                              </div>
+
+                              {/* Category & 3D Flip Top-Right */}
+                              <div className="absolute top-2.5 right-2.5 z-10 flex items-center gap-1">
+                                {card.backImageUrl && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => toggleFlipCard(e, card.id)}
+                                    className={`px-2 py-0.5 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-xs ${
+                                      isFlipped
+                                        ? 'bg-indigo-600 text-white'
+                                        : 'bg-slate-900/80 hover:bg-indigo-600 text-white'
+                                    }`}
+                                    title="點擊翻轉預覽正反面"
+                                  >
+                                    <FlipHorizontal2 className="w-3 h-3" />
+                                    <span>{isFlipped ? '反面' : '翻面'}</span>
+                                  </button>
+                                )}
+                                <span
+                                  className={`text-[11px] font-semibold px-2 py-0.5 rounded-md border backdrop-blur-xs ${
+                                    card.category === 'academic'
+                                      ? 'bg-amber-50/95 dark:bg-amber-950/90 text-amber-900 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+                                      : card.category === 'staff'
+                                      ? 'bg-emerald-50/95 dark:bg-emerald-950/90 text-emerald-900 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700'
+                                      : card.category === 'other'
+                                      ? 'bg-slate-100/95 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                                      : 'bg-blue-50/95 dark:bg-blue-950/90 text-blue-900 dark:text-blue-200 border-blue-300 dark:border-blue-700'
+                                  }`}
+                                >
+                                  {CATEGORY_TEXT_MAP[card.category || 'employer']}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Card Metadata & Quick Actions */}
+                            <div className="p-4 flex-1 flex flex-col justify-between gap-3">
+                              <div>
+                                <div className="flex items-center justify-between gap-2">
+                                  <h4 className="text-[15px] font-bold text-slate-900 dark:text-slate-100 truncate">
+                                    <HighlightText text={displayName} highlight={query} />
+                                  </h4>
+                                  {displayCtry && (
+                                    <span className="text-xs text-slate-500 dark:text-slate-400 shrink-0">
+                                      {displayCtry}
+                                    </span>
                                   )}
                                 </div>
-
-                                <div
-                                  className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <span className="text-xs text-slate-500 font-mono truncate">
-                                    {primaryEmail || card.phone || '點擊檢視'}
-                                  </span>
-                                  <div className="flex items-center gap-1 shrink-0">
-                                    {onOpenQrModal && (
-                                      <button
-                                        type="button"
-                                        onClick={() => onOpenQrModal(card)}
-                                        className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 hover:bg-indigo-50 hover:text-indigo-700 cursor-pointer"
-                                        title="顯示 QR 電子名片"
-                                      >
-                                        <QrCode className="w-3.5 h-3.5" />
-                                      </button>
-                                    )}
-                                    {onOpenEmailDrawer && (
-                                      <button
-                                        type="button"
-                                        onClick={() => onOpenEmailDrawer(card)}
-                                        className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 hover:bg-indigo-50 hover:text-indigo-700 cursor-pointer"
-                                        title="AI 撰寫問候跟進信"
-                                      >
-                                        <Send className="w-3.5 h-3.5" />
-                                      </button>
-                                    )}
+                                <div className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate mt-0.5">
+                                  <HighlightText text={card.company} highlight={query} />
+                                </div>
+                                {card.title && (
+                                  <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                                    <HighlightText text={card.title} highlight={query} />
                                   </div>
+                                )}
+                                {card.summary && (
+                                  <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 line-clamp-2 leading-relaxed">
+                                    <HighlightText text={card.summary} highlight={query} />
+                                  </p>
+                                )}
+                              </div>
+
+                              <div
+                                className="pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  disabled={!primaryEmail && !primaryPhone}
+                                  onClick={(e) => handleQuickCopyContact(e, card)}
+                                  className="text-xs text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 font-mono truncate flex items-center gap-1 cursor-pointer disabled:cursor-default"
+                                  title={
+                                    primaryEmail || primaryPhone ? '點擊複製聯絡方式' : undefined
+                                  }
+                                >
+                                  {copiedCardId === card.id ? (
+                                    <Check className="w-3 h-3 text-emerald-500 shrink-0" />
+                                  ) : primaryEmail || primaryPhone ? (
+                                    <Copy className="w-3 h-3 opacity-50 shrink-0" />
+                                  ) : null}
+                                  <span className="truncate">
+                                    {primaryEmail || primaryPhone || '點擊檢視詳情'}
+                                  </span>
+                                </button>
+                                <div className="flex items-center gap-0.5 shrink-0">
+                                  {onOpenQrModal && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onOpenQrModal(card)}
+                                      className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 hover:text-indigo-700 dark:hover:text-indigo-300 cursor-pointer"
+                                      title="顯示 QR 電子名片"
+                                    >
+                                      <QrCode className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  {onOpenEmailDrawer && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onOpenEmailDrawer(card)}
+                                      className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 hover:text-indigo-700 dark:hover:text-indigo-300 cursor-pointer"
+                                      title="AI 撰寫問候跟進信"
+                                    >
+                                      <Send className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  {onDeleteCard && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => onDeleteCard(e, card.id)}
+                                      className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 hover:text-rose-600 opacity-0 group-hover:opacity-100 focus:opacity-100 touch-visible transition-opacity cursor-pointer"
+                                      title="刪除名片"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-                      <table className="w-full text-left border-collapse">
-                        <thead className="bg-slate-50 border-b border-slate-200">
-                          <tr>
-                            <th className="px-3 py-3 text-center w-11">
-                              <input
-                                type="checkbox"
-                                checked={
-                                  groupItems.length > 0 &&
-                                  groupItems.every((c) => selectedCardIds.has(c.id))
-                                }
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    onSelectBatch?.(groupItems.map((c) => c.id));
-                                  } else {
-                                    groupItems.forEach((c) => {
-                                      if (selectedCardIds.has(c.id)) {
-                                        onToggleCard?.(c.id);
-                                      }
-                                    });
-                                  }
-                                }}
-                                className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
-                                title="全選 / 取消此分組"
-                              />
-                            </th>
-                            <th className="px-2 py-3 w-14" />
-                            <th className="px-4 py-3 text-xs font-bold text-slate-700 tracking-wide">
-                              聯絡人姓名 / 分類
-                            </th>
-                            <th className="px-4 py-3 text-xs font-bold text-slate-700 tracking-wide">
-                              任職機構 · 職稱 · 來源與摘要
-                            </th>
-                            <th className="px-4 py-3 text-xs font-bold text-slate-700 tracking-wide hidden md:table-cell">
-                              電子信箱 / 電話
-                            </th>
-                            <th className="px-4 py-3 text-xs font-bold text-slate-700 tracking-wide w-32 text-right">
-                              快捷操作
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200/80">
-                          {groupItems.map((card) => {
-                            const displayCtry = normalizeCountry(
-                              card.country || card.translations?.country || ''
-                            );
+                          </div>
+                        );
+                      })}
+                    </div>
 
-                            return (
-                              <tr
-                                key={card.id}
-                                onClick={() => onSelectCard(card.id)}
-                                className={`group hover:bg-slate-50/90 cursor-pointer transition-colors ${
-                                  selectedCardIds.has(card.id) ? 'bg-indigo-50/40' : ''
-                                }`}
-                              >
-                                <td
-                                  className="px-3 py-3.5 text-center align-top pt-4"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
+                    {/* Desktop/Tablet Table View */}
+                    {displayMode === 'table' && (
+                      <div className="hidden sm:block bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/90 dark:border-slate-800 overflow-hidden shadow-2xs">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse">
+                            <thead className="bg-slate-50/90 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800">
+                              <tr>
+                                <th className="px-3 py-3 text-center w-11">
                                   <input
                                     type="checkbox"
-                                    checked={selectedCardIds.has(card.id)}
-                                    onChange={() => onToggleCard?.(card.id)}
-                                    className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
-                                  />
-                                </td>
-
-                                <td className="px-2 py-3.5 align-top">
-                                  <CardThumbnail card={card} size="md" className="rounded-md" />
-                                </td>
-
-                                <td className="px-4 py-3.5 align-top">
-                                  <div className="text-[15px] font-bold text-slate-900 flex items-center gap-1.5 flex-wrap leading-snug">
-                                    {card.firstName || card.lastName ? (
-                                      <>
-                                        <HighlightText text={card.lastName} highlight={query} />{' '}
-                                        <HighlightText text={card.firstName} highlight={query} />
-                                      </>
-                                    ) : (
-                                      <HighlightText
-                                        text={card.company || '未知名片'}
-                                        highlight={query}
-                                      />
-                                    )}
-                                    {card.backImageUrl && (
-                                      <span title="含雙面名片影像" className="text-slate-500">
-                                        <FlipHorizontal2 className="w-4 h-4" />
-                                      </span>
-                                    )}
-                                    {duplicateCardIds?.has(card.id) && (
-                                      <span className="text-xs font-bold text-amber-700">
-                                        · 重複
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  <div className="mt-2" onClick={(e) => e.stopPropagation()}>
-                                    <select
-                                      value={card.category || 'employer'}
-                                      onChange={(e) =>
-                                        onUpdateCardCategory?.(card.id, e.target.value as any)
+                                    checked={
+                                      groupItems.length > 0 &&
+                                      groupItems.every((c) => selectedCardIds.has(c.id))
+                                    }
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        onSelectBatch?.(groupItems.map((c) => c.id));
+                                      } else {
+                                        groupItems.forEach((c) => {
+                                          if (selectedCardIds.has(c.id)) {
+                                            onToggleCard?.(c.id);
+                                          }
+                                        });
                                       }
-                                      className={`text-xs font-semibold px-2.5 py-1 rounded-md border cursor-pointer outline-none ${
-                                        card.category === 'academic'
-                                          ? 'bg-amber-50 text-amber-900 border-amber-300'
-                                          : card.category === 'staff'
-                                          ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
-                                          : card.category === 'other'
-                                          ? 'bg-slate-100 text-slate-800 border-slate-300'
-                                          : 'bg-blue-50 text-blue-900 border-blue-300'
-                                      }`}
+                                    }}
+                                    className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                                    title="全選 / 取消此分組"
+                                  />
+                                </th>
+                                <th className="px-2 py-3 w-18" />
+                                <th className="px-4 py-3 text-xs font-bold text-slate-600 dark:text-slate-300 tracking-wide">
+                                  聯絡人姓名 / 分類
+                                </th>
+                                <th className="px-4 py-3 text-xs font-bold text-slate-600 dark:text-slate-300 tracking-wide">
+                                  任職機構 · 職稱 · 來源與摘要
+                                </th>
+                                <th className="px-4 py-3 text-xs font-bold text-slate-600 dark:text-slate-300 tracking-wide hidden md:table-cell">
+                                  電子信箱 / 電話
+                                </th>
+                                <th className="px-4 py-3 text-xs font-bold text-slate-600 dark:text-slate-300 tracking-wide w-36 text-right">
+                                  快捷操作
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200/75 dark:divide-slate-800">
+                              {groupItems.map((card) => {
+                                const displayCtry = normalizeCountry(
+                                  card.country || card.translations?.country || ''
+                                );
+
+                                return (
+                                  <tr
+                                    key={card.id}
+                                    onClick={() => onSelectCard(card.id)}
+                                    className={`group hover:bg-slate-50/90 dark:hover:bg-slate-800/50 cursor-pointer transition-colors ${
+                                      selectedCardIds.has(card.id)
+                                        ? 'bg-indigo-50/50 dark:bg-indigo-950/30'
+                                        : ''
+                                    }`}
+                                  >
+                                    <td
+                                      className="px-3 py-3.5 text-center align-top pt-4"
+                                      onClick={(e) => e.stopPropagation()}
                                     >
-                                      <option value="employer">企業夥伴 (Business)</option>
-                                      <option value="academic">學研專家 (Academic)</option>
-                                      <option value="staff">機關社團 (Organization)</option>
-                                      <option value="other">一般聯絡人 (General)</option>
-                                    </select>
-                                  </div>
-                                </td>
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedCardIds.has(card.id)}
+                                        onChange={() => onToggleCard?.(card.id)}
+                                        className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                                      />
+                                    </td>
 
-                                <td className="px-4 py-3.5 align-top">
-                                  <div className="text-[15px] font-semibold text-slate-900 leading-snug">
-                                    <HighlightText text={card.company} highlight={query} />
-                                  </div>
+                                    <td className="px-2 py-3.5 align-top">
+                                      <CardThumbnail card={card} size="md" />
+                                    </td>
 
-                                  {/* Zero-Pill Static Metadata Row */}
-                                  <div className="text-[13px] text-slate-700 mt-1 flex items-center gap-1.5 flex-wrap leading-relaxed">
-                                    {card.title && (
-                                      <span className="font-medium">
-                                        <HighlightText text={card.title} highlight={query} />
-                                      </span>
-                                    )}
-                                    {displayCtry && (
-                                      <>
-                                        {card.title && <span className="text-slate-400">·</span>}
+                                    <td className="px-4 py-3.5 align-top">
+                                      <div className="text-[15px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5 flex-wrap leading-snug">
+                                        {card.firstName || card.lastName ? (
+                                          <>
+                                            <HighlightText text={card.lastName} highlight={query} />{' '}
+                                            <HighlightText
+                                              text={card.firstName}
+                                              highlight={query}
+                                            />
+                                          </>
+                                        ) : (
+                                          <HighlightText
+                                            text={card.company || '未知名片'}
+                                            highlight={query}
+                                          />
+                                        )}
+                                        {card.backImageUrl && (
+                                          <span
+                                            title="含雙面名片影像"
+                                            className="text-indigo-500 dark:text-indigo-400"
+                                          >
+                                            <FlipHorizontal2 className="w-3.5 h-3.5" />
+                                          </span>
+                                        )}
+                                        {duplicateCardIds?.has(card.id) && (
+                                          <span className="text-xs font-bold text-amber-700 dark:text-amber-400">
+                                            · 重複
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                                        <select
+                                          value={card.category || 'employer'}
+                                          onChange={(e) =>
+                                            onUpdateCardCategory?.(card.id, e.target.value as any)
+                                          }
+                                          className={`text-xs font-semibold px-2 py-0.5 rounded-md border cursor-pointer outline-none ${
+                                            card.category === 'academic'
+                                              ? 'bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+                                              : card.category === 'staff'
+                                              ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-900 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700'
+                                              : card.category === 'other'
+                                              ? 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                                              : 'bg-blue-50 dark:bg-blue-950/60 text-blue-900 dark:text-blue-200 border-blue-300 dark:border-blue-700'
+                                          }`}
+                                        >
+                                          <option value="employer">企業夥伴</option>
+                                          <option value="academic">學研專家</option>
+                                          <option value="staff">機關社團</option>
+                                          <option value="other">一般聯絡人</option>
+                                        </select>
+                                      </div>
+                                    </td>
+
+                                    <td className="px-4 py-3.5 align-top">
+                                      <div className="text-[15px] font-semibold text-slate-900 dark:text-slate-100 leading-snug">
+                                        <HighlightText text={card.company} highlight={query} />
+                                      </div>
+
+                                      <div className="text-[13px] text-slate-600 dark:text-slate-300 mt-1 flex items-center gap-1.5 flex-wrap leading-relaxed">
+                                        {card.title && (
+                                          <span className="font-medium">
+                                            <HighlightText text={card.title} highlight={query} />
+                                          </span>
+                                        )}
+                                        {displayCtry && (
+                                          <>
+                                            {card.title && <span className="text-slate-400">·</span>}
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                updateState({ filterCountry: displayCtry });
+                                              }}
+                                              className="text-indigo-700 dark:text-indigo-400 hover:underline font-semibold cursor-pointer"
+                                              title={`篩選國家：${displayCtry}`}
+                                            >
+                                              <HighlightText
+                                                text={getCountryBilingualLabel(displayCtry)}
+                                                highlight={query}
+                                              />
+                                            </button>
+                                          </>
+                                        )}
+                                        {card.source && card.source !== 'BizMind' && (
+                                          <>
+                                            <span className="text-slate-400">·</span>
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                updateState({ filterSource: card.source });
+                                              }}
+                                              className="text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline cursor-pointer"
+                                              title={`篩選活動來源：${card.source}`}
+                                            >
+                                              來源：<HighlightText text={card.source} highlight={query} />
+                                            </button>
+                                          </>
+                                        )}
+                                      </div>
+
+                                      {card.tags && card.tags.length > 0 && (
+                                        <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+                                          {card.tags.map((t) => (
+                                            <button
+                                              key={t}
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                updateState({ filterTag: t });
+                                              }}
+                                              className="text-xs font-semibold text-indigo-800 dark:text-indigo-200 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 border border-indigo-200 dark:border-indigo-800 px-2 py-0.5 rounded transition-colors cursor-pointer"
+                                              title={`篩選標籤：${t}`}
+                                            >
+                                              #<HighlightText text={t} highlight={query} />
+                                            </button>
+                                          ))}
+                                        </div>
+                                      )}
+
+                                      {card.summary && (
+                                        <p className="mt-1.5 text-[13px] text-slate-600 dark:text-slate-400 leading-relaxed line-clamp-2">
+                                          <HighlightText text={card.summary} highlight={query} />
+                                        </p>
+                                      )}
+
+                                      {card.notes && (
+                                        <p className="mt-1 text-[13px] text-amber-800 dark:text-amber-300/90 leading-relaxed line-clamp-1">
+                                          備註：<HighlightText text={card.notes} highlight={query} />
+                                        </p>
+                                      )}
+                                    </td>
+
+                                    <td
+                                      className="px-4 py-3.5 hidden md:table-cell align-top"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      {card.email && (
                                         <button
                                           type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            updateState({ filterCountry: displayCtry });
-                                          }}
-                                          className="text-indigo-700 hover:underline font-semibold cursor-pointer"
-                                          title={`篩選國家：${displayCtry}`}
+                                          onClick={(e) => handleQuickCopyContact(e, card)}
+                                          className="text-[13px] text-slate-800 dark:text-slate-200 hover:text-indigo-600 dark:hover:text-indigo-400 font-mono truncate max-w-[220px] block text-left cursor-pointer"
+                                          title="點擊複製 Email"
                                         >
                                           <HighlightText
-                                            text={getCountryBilingualLabel(displayCtry)}
+                                            text={String(card.email).split('/')[0].trim()}
                                             highlight={query}
                                           />
                                         </button>
-                                      </>
-                                    )}
-                                    {card.source && card.source !== 'BizMind' && (
-                                      <>
-                                        <span className="text-slate-400">·</span>
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            updateState({ filterSource: card.source });
-                                          }}
-                                          className="text-slate-600 hover:text-indigo-700 hover:underline cursor-pointer"
-                                          title={`篩選活動來源：${card.source}`}
-                                        >
-                                          來源：<HighlightText text={card.source} highlight={query} />
-                                        </button>
-                                      </>
-                                    )}
-                                  </div>
+                                      )}
+                                      {card.phone && (
+                                        <div className="text-[13px] text-slate-500 dark:text-slate-400 font-mono tabular-nums mt-1 truncate max-w-[220px]">
+                                          <HighlightText
+                                            text={String(card.phone).split('/')[0].trim()}
+                                            highlight={query}
+                                          />
+                                        </div>
+                                      )}
+                                    </td>
 
-                                  {card.tags && card.tags.length > 0 && (
-                                    <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
-                                      {card.tags.map((t) => (
-                                        <button
-                                          key={t}
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            updateState({ filterTag: t });
-                                          }}
-                                          className="text-xs font-semibold text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded transition-colors cursor-pointer"
-                                          title={`篩選標籤：${t}`}
-                                        >
-                                          #<HighlightText text={t} highlight={query} />
-                                        </button>
-                                      ))}
-                                    </div>
-                                  )}
-
-                                  {card.summary && (
-                                    <p className="mt-1.5 text-[13px] text-slate-700 leading-relaxed line-clamp-2">
-                                      <HighlightText text={card.summary} highlight={query} />
-                                    </p>
-                                  )}
-
-                                  {card.notes && (
-                                    <p className="mt-1 text-[13px] text-amber-900 leading-relaxed line-clamp-1">
-                                      備註：<HighlightText text={card.notes} highlight={query} />
-                                    </p>
-                                  )}
-                                </td>
-
-                                <td className="px-4 py-3.5 hidden md:table-cell align-top">
-                                  {card.email && (
-                                    <div className="text-[13px] text-slate-800 font-mono truncate max-w-[230px]">
-                                      <HighlightText
-                                        text={String(card.email).split('/')[0].trim()}
-                                        highlight={query}
-                                      />
-                                    </div>
-                                  )}
-                                  {card.phone && (
-                                    <div className="text-[13px] text-slate-600 font-mono tabular-nums mt-1 truncate max-w-[230px]">
-                                      <HighlightText
-                                        text={String(card.phone).split('/')[0].trim()}
-                                        highlight={query}
-                                      />
-                                    </div>
-                                  )}
-                                </td>
-
-                                <td
-                                  className="px-4 py-3.5 text-right align-top"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <div className="flex items-center justify-end gap-1">
-                                    {onOpenQrModal && (
-                                      <button
-                                        type="button"
-                                        onClick={() => onOpenQrModal(card)}
-                                        className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-indigo-50 hover:text-indigo-700 transition-colors cursor-pointer"
-                                        title="顯示 vCard QR Code"
-                                      >
-                                        <QrCode className="w-4 h-4" />
-                                      </button>
-                                    )}
-                                    {onOpenEmailDrawer && (
-                                      <button
-                                        type="button"
-                                        onClick={() => onOpenEmailDrawer(card)}
-                                        className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-indigo-50 hover:text-indigo-700 transition-colors cursor-pointer"
-                                        title="撰寫跟進開發信草稿"
-                                      >
-                                        <Send className="w-4 h-4" />
-                                      </button>
-                                    )}
-                                    {onDeleteCard && (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => onDeleteCard(e, card.id)}
-                                        className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
-                                        title="刪除名片"
-                                      >
-                                        <Trash2 className="w-4 h-4" />
-                                      </button>
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={() => onSelectCard(card.id)}
-                                      className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 group-hover:text-indigo-700 transition-colors cursor-pointer"
-                                      title="開啟審閱詳情"
+                                    <td
+                                      className="px-4 py-3.5 text-right align-top"
+                                      onClick={(e) => e.stopPropagation()}
                                     >
-                                      <ChevronRight className="w-4 h-4" />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
+                                      <div className="flex items-center justify-end gap-1">
+                                        {onOpenQrModal && (
+                                          <button
+                                            type="button"
+                                            onClick={() => onOpenQrModal(card)}
+                                            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors cursor-pointer"
+                                            title="顯示 vCard QR Code"
+                                          >
+                                            <QrCode className="w-4 h-4" />
+                                          </button>
+                                        )}
+                                        {onOpenEmailDrawer && (
+                                          <button
+                                            type="button"
+                                            onClick={() => onOpenEmailDrawer(card)}
+                                            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors cursor-pointer"
+                                            title="撰寫跟進開發信草稿"
+                                          >
+                                            <Send className="w-4 h-4" />
+                                          </button>
+                                        )}
+                                        {onDeleteCard && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => onDeleteCard(e, card.id)}
+                                            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 hover:text-rose-600 opacity-0 group-hover:opacity-100 focus:opacity-100 touch-visible transition-opacity cursor-pointer"
+                                            title="刪除名片"
+                                          >
+                                            <Trash2 className="w-4 h-4" />
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => onSelectCard(card.id)}
+                                          className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors cursor-pointer"
+                                          title="開啟審閱詳情"
+                                        >
+                                          <ChevronRight className="w-4 h-4" />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
                     )}
                   </div>
                 )
+              )}
+
+              {/* Load More Button for Large Collections */}
+              {renderLimit < sortedCards.length && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setRenderLimit((prev) => Math.min(sortedCards.length, prev + 100))}
+                    className="px-5 py-2.5 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold shadow-2xs transition-colors cursor-pointer tabular-nums"
+                  >
+                    載入更多名片（尚有 {sortedCards.length - renderLimit} 筆）
+                  </button>
+                </div>
               )}
             </div>
           )}

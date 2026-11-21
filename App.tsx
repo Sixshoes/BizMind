@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { motion } from 'motion/react';
 import * as pdfjsLib from 'pdfjs-dist';
 import type { User } from 'firebase/auth';
 import {
@@ -8,15 +9,12 @@ import {
   Layers,
   Keyboard,
   Download,
-  Settings,
   Camera,
   Plus,
   Search,
   ChevronDown,
-  Check,
   Trash2,
   Loader2,
-  RefreshCw,
   Upload,
   FileSpreadsheet,
   QrCode,
@@ -41,6 +39,13 @@ import {
   Leaf,
   LogOut,
   LogIn,
+  HelpCircle,
+  Sun,
+  Moon,
+  Monitor,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 
 import {
@@ -50,7 +55,8 @@ import {
   DualSideConflictItem,
   DualSideResolutionStrategy,
 } from './types';
-import { filterCards } from './utils/cardFilters';
+import { filterCards, FilterIntent } from './utils/cardFilters';
+import { ThemePreference, getSavedTheme, applyTheme } from './utils/theme';
 import { normalizeCountry, getCountryBilingualLabel } from './utils/countries';
 import {
   inferCountryFromCard,
@@ -100,6 +106,8 @@ import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { UserGuideModal } from './components/UserGuideModal';
 import { DualSideConflictModal } from './components/DualSideConflictModal';
 import { ThreeGoodImpactModal } from './components/ThreeGoodImpactModal';
+import { CommandPalette } from './components/CommandPalette';
+import { ScanQueueDock } from './components/ScanQueueDock';
 import { compressImage } from './utils/imageUtils';
 import {
   detectDualSideConflict,
@@ -146,6 +154,7 @@ const App: React.FC = () => {
     selectCard,
     formData,
     setFormData,
+    isFormDirty,
     saveStatus,
     scheduleAutoSave,
     flushPendingSave,
@@ -174,7 +183,12 @@ const App: React.FC = () => {
   const [tourStepIndex, setTourStepIndex] = useState<number>(-1);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const [showHelpMenu, setShowHelpMenu] = useState(false);
   const [showShareMenu, setShowShareMenu] = useState(false);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [theme, setTheme] = useState<ThemePreference>(() => getSavedTheme());
 
   // --- Modals & Drawers State ---
   const [duplicatePrompt, setDuplicatePrompt] = useState<any>(null);
@@ -225,7 +239,9 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
+  const helpMenuRef = useRef<HTMLDivElement>(null);
   const shareMenuRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // --- Feature Hooks ---
   const { bgTaskCount, runBackgroundSummaryCheck } = useBackgroundTasks(setCards, setFormData);
@@ -238,7 +254,7 @@ const App: React.FC = () => {
     runBackgroundSummaryCheck
   );
 
-  const { handleRetryTask, processBatchFiles } = useScanPipeline(
+  const { isQueuePaused, setIsQueuePaused, handleRetryTask, processBatchFiles } = useScanPipeline(
     cardsRef,
     setCards,
     tasks,
@@ -447,6 +463,9 @@ const App: React.FC = () => {
       if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target as Node)) {
         setShowSettingsMenu(false);
       }
+      if (helpMenuRef.current && !helpMenuRef.current.contains(event.target as Node)) {
+        setShowHelpMenu(false);
+      }
       if (shareMenuRef.current && !shareMenuRef.current.contains(event.target as Node)) {
         setShowShareMenu(false);
       }
@@ -460,6 +479,39 @@ const App: React.FC = () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, []);
+
+  // --- Theme Lifecycle (Light / Dark / System) ---
+  useEffect(() => {
+    applyTheme(theme);
+    if (theme !== 'system' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const listener = () => applyTheme('system');
+    mq.addEventListener('change', listener);
+    return () => mq.removeEventListener('change', listener);
+  }, [theme]);
+
+  const handleCycleTheme = useCallback(() => {
+    const next: ThemePreference =
+      theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light';
+    const labelMap: Record<ThemePreference, string> = {
+      light: '淺色模式',
+      dark: '深色模式',
+      system: '跟隨系統外觀',
+    };
+    setTheme(next);
+    addToast({ type: 'info', message: `已切換外觀主題：${labelMap[next]}`, duration: 2400 });
+  }, [theme, addToast]);
+
+  // --- Unsaved Dirty Form Protection ---
+  useEffect(() => {
+    if (!isFormDirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [isFormDirty]);
 
   useEffect(() => {
     document.documentElement.dataset.fontScale = fontScale;
@@ -489,8 +541,7 @@ const App: React.FC = () => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        flushPendingSave();
-        setViewMode((prev) => (prev === 'search' ? 'detail' : 'search'));
+        setShowCommandPalette((prev) => !prev);
         return;
       }
 
@@ -505,6 +556,7 @@ const App: React.FC = () => {
       if (isTypingInInput) return;
 
       if (
+        showCommandPalette ||
         isQsModalOpen ||
         showDuplicateManager ||
         showUserGuideModal ||
@@ -516,6 +568,12 @@ const App: React.FC = () => {
         Boolean(duplicatePrompt) ||
         Boolean(duplicateFilePrompt)
       ) {
+        return;
+      }
+
+      if (event.key === '/' && viewMode === 'search') {
+        event.preventDefault();
+        searchInputRef.current?.focus();
         return;
       }
 
@@ -579,7 +637,7 @@ const App: React.FC = () => {
   }, [
     authUser,
     isGuestMode,
-    flushPendingSave,
+    showCommandPalette,
     isQsModalOpen,
     showDuplicateManager,
     showUserGuideModal,
@@ -632,9 +690,11 @@ const App: React.FC = () => {
   const handleBatchUpdateCategory = useCallback(
     async (category: 'employer' | 'academic' | 'staff' | 'other') => {
       if (selectedCardIds.size === 0) return;
+      const previousSnapshots: BusinessCardData[] = [];
       const toSave: BusinessCardData[] = [];
       const updatedAll = cards.map((c) => {
         if (!selectedCardIds.has(c.id)) return c;
+        previousSnapshots.push(c);
         const next: BusinessCardData = { ...c, category };
         toSave.push(next);
         return next;
@@ -647,7 +707,16 @@ const App: React.FC = () => {
       }
       addToast({
         type: 'success',
+        duration: 5000,
         message: `已批次將 ${toSave.length} 筆名片設為「${CATEGORY_DISPLAY_LABELS[category]}」`,
+        onUndo: async () => {
+          await saveAllCardsToDB(previousSnapshots);
+          const snapMap = new Map(previousSnapshots.map((s) => [s.id, s]));
+          setCards((prev) => prev.map((c) => snapMap.get(c.id) || c));
+          if (formData && snapMap.has(formData.id)) {
+            setFormData(snapMap.get(formData.id)!);
+          }
+        },
       });
     },
     [cards, selectedCardIds, formData, setCards, setFormData, addToast]
@@ -657,9 +726,11 @@ const App: React.FC = () => {
     async (rawCountry: string) => {
       if (selectedCardIds.size === 0) return;
       const normalized = normalizeCountry(rawCountry);
+      const previousSnapshots: BusinessCardData[] = [];
       const toSave: BusinessCardData[] = [];
       const updatedAll = cards.map((c) => {
         if (!selectedCardIds.has(c.id)) return c;
+        previousSnapshots.push(c);
         const next: BusinessCardData = {
           ...c,
           country: normalized,
@@ -678,7 +749,16 @@ const App: React.FC = () => {
       }
       addToast({
         type: 'success',
+        duration: 5000,
         message: `已將 ${toSave.length} 筆名片的國家設為「${normalized}」`,
+        onUndo: async () => {
+          await saveAllCardsToDB(previousSnapshots);
+          const snapMap = new Map(previousSnapshots.map((s) => [s.id, s]));
+          setCards((prev) => prev.map((c) => snapMap.get(c.id) || c));
+          if (formData && snapMap.has(formData.id)) {
+            setFormData(snapMap.get(formData.id)!);
+          }
+        },
       });
     },
     [cards, selectedCardIds, formData, setCards, setFormData, addToast]
@@ -687,9 +767,11 @@ const App: React.FC = () => {
   const handleBatchUpdateSource = useCallback(
     async (source: string) => {
       if (selectedCardIds.size === 0) return;
+      const previousSnapshots: BusinessCardData[] = [];
       const toSave: BusinessCardData[] = [];
       const updatedAll = cards.map((c) => {
         if (!selectedCardIds.has(c.id)) return c;
+        previousSnapshots.push(c);
         const next: BusinessCardData = { ...c, source };
         toSave.push(next);
         return next;
@@ -702,7 +784,16 @@ const App: React.FC = () => {
       }
       addToast({
         type: 'success',
+        duration: 5000,
         message: `已將 ${toSave.length} 筆名片的活動來源設為「${source}」`,
+        onUndo: async () => {
+          await saveAllCardsToDB(previousSnapshots);
+          const snapMap = new Map(previousSnapshots.map((s) => [s.id, s]));
+          setCards((prev) => prev.map((c) => snapMap.get(c.id) || c));
+          if (formData && snapMap.has(formData.id)) {
+            setFormData(snapMap.get(formData.id)!);
+          }
+        },
       });
     },
     [cards, selectedCardIds, formData, setCards, setFormData, addToast]
@@ -713,9 +804,11 @@ const App: React.FC = () => {
       if (selectedCardIds.size === 0) return;
       const cleanTag = tag.trim();
       if (!cleanTag) return;
+      const previousSnapshots: BusinessCardData[] = [];
       const toSave: BusinessCardData[] = [];
       const updatedAll = cards.map((c) => {
         if (!selectedCardIds.has(c.id)) return c;
+        previousSnapshots.push(c);
         const mergedTags = Array.from(new Set([...(c.tags || []), cleanTag]));
         const next: BusinessCardData = { ...c, tags: mergedTags };
         toSave.push(next);
@@ -729,7 +822,16 @@ const App: React.FC = () => {
       }
       addToast({
         type: 'success',
+        duration: 5000,
         message: `已為 ${toSave.length} 筆名片新增標籤「#${cleanTag}」`,
+        onUndo: async () => {
+          await saveAllCardsToDB(previousSnapshots);
+          const snapMap = new Map(previousSnapshots.map((s) => [s.id, s]));
+          setCards((prev) => prev.map((c) => snapMap.get(c.id) || c));
+          if (formData && snapMap.has(formData.id)) {
+            setFormData(snapMap.get(formData.id)!);
+          }
+        },
       });
     },
     [cards, selectedCardIds, formData, setCards, setFormData, addToast]
@@ -1718,9 +1820,9 @@ const App: React.FC = () => {
     autoDetectInCropper(newB64.split(',')[1]);
   };
 
-  // --- Camera Capture Handler (Supports Front New Card & Back Side Merge) ---
+  // --- Camera Capture Handler (Supports Front New Card, Burst Mode & Back Side Merge) ---
   const handleCameraCapture = useCallback(
-    async (b64: string) => {
+    async (b64: string, options?: { keepOpen?: boolean }) => {
       if (cameraTarget === 'back_side' && formData) {
         setViewMode('detail');
         setCameraTarget('new_card');
@@ -1764,16 +1866,40 @@ const App: React.FC = () => {
         ...prev,
         {
           id,
-          fileName: `SCAN_${Date.now()}`,
+          fileName: `SCAN_${new Date().toLocaleTimeString('zh-TW', { hour12: false }).replace(/:/g, '')}`,
           status: 'pending',
           progress: 0,
           batchIndex: 1,
           previewUrl,
         },
       ]);
-      setViewMode('detail');
+      if (options?.keepOpen) {
+        addToast({ type: 'info', message: '已加入背景辨識佇列，可繼續拍攝下一張', duration: 2000 });
+      } else {
+        setViewMode('detail');
+      }
     },
     [cameraTarget, formData, persistCardNow, handleProcessBackSideExtraction, addToast, setTasks]
+  );
+
+  // --- Sync AI Chat Detected Intent to SearchPage Filters ---
+  const handleChatIntentDetected = useCallback(
+    (intent: FilterIntent) => {
+      setSearchPageState((prev) => ({
+        ...prev,
+        query: intent.searchText ?? '',
+        filterCategory: intent.category || 'all',
+        filterCountry: intent.country ? normalizeCountry(intent.country) : 'all',
+        filterTag: intent.tag || 'all',
+        filterSource: intent.source || 'all',
+        filterHasEmail: Boolean(intent.requireEmail),
+        filterHasPhone: Boolean(intent.requirePhone),
+        filterHasBackImage: Boolean(intent.requireBackImage),
+      }));
+      setViewMode('search');
+      addToast({ type: 'success', message: '已將 AI 語意篩選條件套用至名片資料庫' });
+    },
+    [addToast]
   );
 
   // --- Drag & Drop ---
@@ -1861,10 +1987,10 @@ const App: React.FC = () => {
         requiredView: 'search',
       },
       {
-        targetId: 'btn-replay-tour',
-        title: '隨時查閱教學手冊或重看導覽',
+        targetId: 'btn-help',
+        title: '隨時查閱教學手冊、快捷鍵或重看導覽',
         content:
-          '導覽結束後，您隨時可點擊「使用教學」查閱完整圖文指南，或點擊「重看教學」重新播放本互動步驟導覽！',
+          '點擊右上角「?」幫助中心即可查閱圖文指南、鍵盤快捷鍵、減碳與 AI 揭露，或按 ⌘K 開啟全域快速指令面板！',
         position: 'bottom-right',
         requiredView: 'search',
       },
@@ -1934,8 +2060,8 @@ const App: React.FC = () => {
   // --- Auth Loading & Login Gate ---
   if (authUser === undefined) {
     return (
-      <div className="min-h-screen w-full bg-slate-50 flex flex-col items-center justify-center gap-3 text-slate-600">
-        <Loader2 className="w-7 h-7 animate-spin text-indigo-600" />
+      <div className="min-h-screen w-full bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center gap-3 text-slate-600 dark:text-slate-300">
+        <Loader2 className="w-7 h-7 animate-spin text-indigo-600 dark:text-indigo-400" />
         <span className="text-sm font-semibold">正在載入 BizMind 工作區...</span>
       </div>
     );
@@ -1945,9 +2071,14 @@ const App: React.FC = () => {
     return <LoginScreen onEnterGuestMode={handleEnterGuestMode} />;
   }
 
+  const userInitial =
+    authUser?.displayName?.charAt(0).toUpperCase() ||
+    authUser?.email?.charAt(0).toUpperCase() ||
+    '訪';
+
   return (
     <div
-      className="flex flex-col h-screen w-full bg-slate-50 text-slate-900 font-sans overflow-hidden"
+      className="flex flex-col h-screen w-full bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -1964,33 +2095,51 @@ const App: React.FC = () => {
 
       {/* Non-Blocking Top Progress Strip */}
       {(isCloudSyncing || bgTaskCount > 0) && (
-        <div className="h-1 w-full bg-slate-200 overflow-hidden shrink-0 z-50">
+        <div className="h-1 w-full bg-slate-200 dark:bg-slate-800 overflow-hidden shrink-0 z-50">
           <div className="h-full w-1/2 bg-indigo-600 animate-pulse transition-all duration-300" />
         </div>
       )}
 
       {/* =========================================================
-          GLOBAL 3-ZONE TOP BAR CONTRACT
-          Zone 1: Brand | Zone 2: Navigation | Zone 3: Actions + 1 CTA
+          STREAMLINED 3-ZONE GLOBAL HEADER
+          Zone 1: Brand | Zone 2: Core Workspace Switcher | Zone 3: ⌘K + Help + Export + Account + CTA
          ========================================================= */}
-      <header className="min-h-[60px] bg-white border-b border-slate-200 px-4 lg:px-6 py-2 flex items-center justify-between gap-3 lg:gap-6 shrink-0 z-30">
+      <header className="min-h-[58px] bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200/90 dark:border-slate-800 px-3.5 lg:px-6 py-2 flex items-center justify-between gap-3 shrink-0 z-30">
         {/* Zone 1: Brand Identity */}
-        <div className="flex items-center gap-2.5 shrink-0">
-          <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+        <button
+          type="button"
+          onClick={async () => {
+            await flushPendingSave();
+            setViewMode('search');
+          }}
+          className="flex items-center gap-2.5 shrink-0 text-left cursor-pointer group"
+        >
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-600 to-indigo-700 text-white flex items-center justify-center shrink-0 shadow-xs group-hover:scale-[1.03] transition-transform">
             <ScanLine className="w-4 h-4" />
           </div>
           <div className="flex flex-col">
-            <span className="font-display font-bold text-lg tracking-tight text-slate-900 leading-none whitespace-nowrap">
+            <span className="font-display font-bold text-lg tracking-tight text-slate-900 dark:text-white leading-none whitespace-nowrap">
               BizMind
             </span>
-            <span className="text-[11px] font-medium text-slate-500 mt-0.5 hidden sm:inline whitespace-nowrap">
-              {authUser ? '雲端同步工作區' : '本機體驗模式'}
+            <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5 hidden sm:inline-flex items-center gap-1.5 whitespace-nowrap">
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isCloudSyncing
+                    ? 'bg-indigo-500 animate-pulse'
+                    : authUser
+                    ? 'bg-emerald-500'
+                    : 'bg-slate-400'
+                }`}
+              />
+              <span>
+                {isCloudSyncing ? '雲端同步中' : authUser ? '雲端同步工作區' : '本機體驗模式'}
+              </span>
             </span>
           </div>
-        </div>
+        </button>
 
-        {/* Zone 2: Primary Workspace Navigation & Tutorial Access */}
-        <nav className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar">
+        {/* Zone 2: Focused Primary Workspace Switcher (Desktop/Tablet) */}
+        <nav className="hidden md:flex items-center gap-1 bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200/70 dark:border-slate-700/70">
           <button
             id="nav-database"
             type="button"
@@ -1998,15 +2147,26 @@ const App: React.FC = () => {
               await flushPendingSave();
               setViewMode('search');
             }}
-            className={`px-3.5 py-2 rounded-lg text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
+            className={`relative px-3.5 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
               viewMode === 'search'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:text-slate-950 hover:bg-slate-100'
+                ? 'text-white'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
-            <Database className="w-4 h-4" />
-            <span>名片資料庫</span>
-            <span className={viewMode === 'search' ? 'text-slate-300' : 'text-slate-500'}>
+            {viewMode === 'search' && (
+              <motion.span
+                layoutId="global-nav-pill"
+                transition={{ type: 'spring', stiffness: 460, damping: 34 }}
+                className="absolute inset-0 bg-slate-900 dark:bg-indigo-600 rounded-lg shadow-xs"
+              />
+            )}
+            <Database className="w-4 h-4 relative z-10" />
+            <span className="relative z-10">名片資料庫</span>
+            <span
+              className={`relative z-10 text-xs ${
+                viewMode === 'search' ? 'text-slate-300 dark:text-indigo-200' : 'text-slate-400'
+              }`}
+            >
               ({cards.length})
             </span>
           </button>
@@ -2015,99 +2175,119 @@ const App: React.FC = () => {
             id="nav-workspace"
             type="button"
             onClick={() => setViewMode(formData ? 'detail' : 'file')}
-            className={`px-3.5 py-2 rounded-lg text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`relative px-3.5 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               viewMode !== 'search'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-700 hover:text-slate-950 hover:bg-slate-100'
+                ? 'text-white'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
-            <LayoutPanelLeft className="w-4 h-4" />
-            <span>審閱工作台</span>
+            {viewMode !== 'search' && (
+              <motion.span
+                layoutId="global-nav-pill"
+                transition={{ type: 'spring', stiffness: 460, damping: 34 }}
+                className="absolute inset-0 bg-slate-900 dark:bg-indigo-600 rounded-lg shadow-xs"
+              />
+            )}
+            <LayoutPanelLeft className="w-4 h-4 relative z-10" />
+            <span className="relative z-10">審閱工作台</span>
             {tasks.some((t) => t.status === 'processing' || t.status === 'pending') && (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400 relative z-10" />
             )}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleFindDuplicates}
-            className="hidden md:flex px-3 py-2 rounded-lg text-sm font-semibold items-center gap-1.5 text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums"
-          >
-            <Layers className="w-4 h-4" />
-            <span>重複管理</span>
-            {duplicateAnalysis.totalDuplicateCount > 0 && (
-              <span className="text-amber-700 font-bold">
-                ({duplicateAnalysis.totalDuplicateCount})
-              </span>
-            )}
-          </button>
-
-          <div className="hidden lg:block h-5 w-px bg-slate-200 mx-0.5 shrink-0" />
-
-          <button
-            id="btn-tutorial"
-            type="button"
-            onClick={() => setShowUserGuideModal(true)}
-            className="px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-1.5 text-indigo-700 bg-indigo-50/80 hover:bg-indigo-100 border border-indigo-200/80 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            title="開啟完整圖文使用教學指南"
-          >
-            <BookOpen className="w-4 h-4" />
-            <span>使用教學</span>
-          </button>
-
-          <button
-            id="btn-replay-tour"
-            type="button"
-            onClick={handleStartInteractiveTour}
-            className="hidden sm:flex px-3 py-2 rounded-lg text-sm font-semibold items-center gap-1.5 text-slate-700 hover:text-indigo-700 hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            title="重看互動式步驟導覽教學"
-          >
-            <RotateCcw className="w-4 h-4" />
-            <span>重看教學</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowImpactModal(true)}
-            className="hidden xl:flex px-2.5 py-2 rounded-lg text-sm font-medium items-center gap-1.5 text-emerald-800 hover:bg-emerald-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            title="無紙化減碳統計與 AI 技術揭露"
-          >
-            <Leaf className="w-4 h-4 text-emerald-600" />
-            <span>減碳與 AI 揭露</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowShortcutsModal(true)}
-            className="hidden 2xl:flex px-2.5 py-2 rounded-lg text-sm font-medium items-center gap-1.5 text-slate-600 hover:text-slate-950 hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            title="檢視鍵盤快捷鍵 (?)"
-          >
-            <Keyboard className="w-4 h-4" />
-            <span>快捷鍵</span>
           </button>
         </nav>
 
-        {/* Zone 3: Secondary Controls + Single Primary CTA */}
-        <div className="flex items-center gap-2 shrink-0">
-          {isCloudSyncing && (
-            <span className="hidden 2xl:inline-flex items-center gap-1.5 text-sm font-semibold text-indigo-700 whitespace-nowrap tabular-nums mr-1">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>雲端同步中...</span>
-            </span>
-          )}
-
-          {/* Font Size Comfort Switcher */}
+        {/* Zone 3: Quick Spotlight + Help + Export + Account/Settings + Primary CTA */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Spotlight Command Palette Trigger */}
           <button
             type="button"
-            onClick={handleCycleFontScale}
-            className="hidden md:flex h-10 px-2.5 rounded-lg text-sm font-semibold bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 transition-colors items-center gap-1 whitespace-nowrap cursor-pointer"
-            title="切換全站文字大小（標準 / 舒適 / 大字級）"
+            onClick={() => setShowCommandPalette(true)}
+            className="hidden lg:flex h-9 px-2.5 rounded-xl bg-slate-100/90 dark:bg-slate-800 hover:bg-slate-200/80 dark:hover:bg-slate-700 border border-slate-200/80 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-xs font-semibold items-center gap-2 transition-colors cursor-pointer"
+            title="快速搜尋名片與功能指令 (⌘K)"
           >
-            <Type className="w-4 h-4 text-slate-600" />
-            <span className="text-xs font-bold">
-              {fontScale === 'large' ? '大字' : fontScale === 'comfortable' ? '舒適' : '標準'}
-            </span>
+            <Search className="w-3.5 h-3.5 text-slate-400" />
+            <span>快速跳轉...</span>
+            <kbd className="px-1.5 py-0.5 text-[10px] font-mono bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded text-slate-500">
+              ⌘K
+            </kbd>
           </button>
+
+          {/* Compact Help Center Popover (?) */}
+          <div className="relative" ref={helpMenuRef}>
+            <button
+              id="btn-help"
+              type="button"
+              onClick={() => setShowHelpMenu((p) => !p)}
+              className={`h-9 w-9 sm:w-auto sm:px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                showHelpMenu
+                  ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-200'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+              title="使用教學、互動導覽、快捷鍵與永續揭露"
+              aria-label="幫助中心"
+            >
+              <HelpCircle className="w-4 h-4" />
+              <span className="hidden xl:inline">教學</span>
+            </button>
+
+            {showHelpMenu && (
+              <div className="absolute right-0 top-full mt-1.5 w-64 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-fadeIn">
+                <div className="px-3.5 py-1 text-[11px] font-bold text-slate-400 tracking-wide">
+                  幫助中心與系統說明
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowHelpMenu(false);
+                    setShowUserGuideModal(true);
+                  }}
+                  className="w-full text-left px-3.5 py-2 text-sm font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <BookOpen className="w-4 h-4 shrink-0" />
+                  <span>完整圖文使用教學</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowHelpMenu(false);
+                    handleStartInteractiveTour();
+                  }}
+                  className="w-full text-left px-3.5 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-4 h-4 text-slate-500 shrink-0" />
+                  <span>重看互動步驟導覽</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowHelpMenu(false);
+                    setShowShortcutsModal(true);
+                  }}
+                  className="w-full text-left px-3.5 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Keyboard className="w-4 h-4 text-slate-500 shrink-0" />
+                    <span>鍵盤快捷鍵清單</span>
+                  </span>
+                  <kbd className="px-1.5 py-0.5 text-[10px] font-mono bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded text-slate-500">
+                    ?
+                  </kbd>
+                </button>
+                <div className="h-px bg-slate-100 dark:bg-slate-800 my-1" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowHelpMenu(false);
+                    setShowImpactModal(true);
+                  }}
+                  className="w-full text-left px-3.5 py-2 text-sm font-medium text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50/70 dark:hover:bg-emerald-950/40 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <Leaf className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span>無紙化減碳與 AI 揭露</span>
+                </button>
+              </div>
+            )}
+          </div>
 
           {/* Export Dropdown */}
           <div className="relative" ref={exportMenuRef}>
@@ -2115,20 +2295,21 @@ const App: React.FC = () => {
               id="btn-export"
               type="button"
               onClick={() => setShowExportMenu((prev) => !prev)}
-              className={`h-10 px-3 rounded-lg text-sm font-semibold border transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+              className={`h-9 px-2.5 sm:px-3 rounded-xl text-xs sm:text-sm font-semibold border transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
                 showExportMenu
-                  ? 'bg-slate-100 border-slate-400 text-slate-900'
-                  : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-50'
+                  ? 'bg-slate-100 dark:bg-slate-800 border-slate-400 dark:border-slate-600 text-slate-900 dark:text-white'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
+              title="匯出聯絡人報表與備份"
             >
               <Download className="w-4 h-4" />
-              <span className="hidden sm:inline">匯出報表</span>
-              <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+              <span className="hidden sm:inline">匯出</span>
+              <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden sm:inline" />
             </button>
 
             {showExportMenu && (
-              <div className="absolute right-0 top-full mt-1.5 w-72 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-50 animate-fadeIn">
-                <div className="px-4 py-1 text-xs font-bold text-indigo-700 tracking-wide tabular-nums">
+              <div className="absolute right-0 top-full mt-1.5 w-72 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 py-2 z-50 animate-fadeIn">
+                <div className="px-4 py-1 text-xs font-bold text-indigo-700 dark:text-indigo-400 tracking-wide tabular-nums">
                   資料完整聯絡人名單 ({boundQsSummary.readyCards.length} 筆)
                 </div>
                 <button
@@ -2137,7 +2318,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExportBoundQsList();
                   }}
-                  className="w-full text-left px-4 py-2.5 text-sm font-bold text-indigo-800 bg-indigo-50/70 hover:bg-indigo-100/80 transition-colors cursor-pointer tabular-nums"
+                  className="w-full text-left px-4 py-2.5 text-sm font-bold text-indigo-800 dark:text-indigo-200 bg-indigo-50/70 dark:bg-indigo-950/60 hover:bg-indigo-100/80 dark:hover:bg-indigo-900/60 transition-colors cursor-pointer tabular-nums"
                 >
                   一鍵輸出完整分類報表 ({boundQsSummary.readyCards.length} 筆 .xlsx)
                 </button>
@@ -2148,15 +2329,15 @@ const App: React.FC = () => {
                     handleBindCompliantQsList();
                     setIsQsModalOpen(true);
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                 >
                   檢視完整度審閱與分類健檢
                 </button>
-                <div className="h-px bg-slate-100 my-1.5" />
+                <div className="h-px bg-slate-100 dark:bg-slate-800 my-1.5" />
 
                 {selectedCardIds.size > 0 && (
                   <>
-                    <div className="px-4 py-1 text-xs font-bold text-indigo-700 tracking-wide tabular-nums">
+                    <div className="px-4 py-1 text-xs font-bold text-indigo-700 dark:text-indigo-400 tracking-wide tabular-nums">
                       已選取聯絡人 ({selectedCardIds.size})
                     </div>
                     <button
@@ -2165,15 +2346,15 @@ const App: React.FC = () => {
                         setShowExportMenu(false);
                         setIsQsModalOpen(true);
                       }}
-                      className="w-full text-left px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 transition-colors cursor-pointer"
+                      className="w-full text-left px-4 py-2 text-sm font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 transition-colors cursor-pointer"
                     >
                       審核選取名單並匯出 Excel
                     </button>
-                    <div className="h-px bg-slate-100 my-1.5" />
+                    <div className="h-px bg-slate-100 dark:bg-slate-800 my-1.5" />
                   </>
                 )}
 
-                <div className="px-4 py-1 text-xs font-bold text-slate-500 tracking-wide">
+                <div className="px-4 py-1 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wide">
                   依聯絡人角色分類匯出 (.xlsx)
                 </div>
                 <button
@@ -2182,7 +2363,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('employer');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer tabular-nums"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer tabular-nums"
                 >
                   匯出企業夥伴 ({boundQsSummary.employerCards.length} 筆)
                 </button>
@@ -2192,7 +2373,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('academic');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer tabular-nums"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer tabular-nums"
                 >
                   匯出學研專家 ({boundQsSummary.academicCards.length} 筆)
                 </button>
@@ -2202,13 +2383,13 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('staff');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer tabular-nums"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer tabular-nums"
                 >
                   匯出機關社團 ({cards.filter((c) => c.category === 'staff').length} 筆)
                 </button>
 
-                <div className="h-px bg-slate-100 my-1.5" />
-                <div className="px-4 py-1 text-xs font-bold text-slate-500 tracking-wide">
+                <div className="h-px bg-slate-100 dark:bg-slate-800 my-1.5" />
+                <div className="px-4 py-1 text-xs font-bold text-slate-500 dark:text-slate-400 tracking-wide">
                   完整資料與備份
                 </div>
                 <button
@@ -2217,7 +2398,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('all_clean');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
                 >
                   所有名片原文總表 (.xlsx)
                 </button>
@@ -2227,7 +2408,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('all_original');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
                 >
                   所有名片含翻譯與備註 (.xlsx)
                 </button>
@@ -2237,7 +2418,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('vcard');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
                 >
                   vCard 電子通訊錄 (.vcf)
                 </button>
@@ -2247,7 +2428,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('zip');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
                 >
                   打包下載 ZIP (含名片影像)
                 </button>
@@ -2257,7 +2438,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('full_backup');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-semibold text-indigo-700 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 cursor-pointer"
                 >
                   完整系統備份 (.json 含影像)
                 </button>
@@ -2267,7 +2448,7 @@ const App: React.FC = () => {
                     setShowExportMenu(false);
                     handleExport('csv');
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
                 >
                   完整系統備份 (.csv)
                 </button>
@@ -2275,39 +2456,53 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* Cloud, Account & System Menu */}
+          {/* Account, Theme, Preferences & System Maintenance Menu */}
           <div className="relative" ref={settingsMenuRef}>
             <button
               id="btn-settings"
               type="button"
               onClick={() => setShowSettingsMenu((prev) => !prev)}
-              className={`h-10 px-3 rounded-lg text-sm font-semibold border transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+              className={`h-9 pl-1.5 pr-2.5 rounded-xl text-xs font-semibold border transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer ${
                 showSettingsMenu
-                  ? 'bg-slate-100 border-slate-400 text-slate-900'
-                  : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-50'
+                  ? 'bg-slate-100 dark:bg-slate-800 border-slate-400 dark:border-slate-600 text-slate-900 dark:text-white'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
-              title="個人雲端同步、維護工具與系統設定"
+              title="個人帳號、外觀設定與資料品質維護"
             >
-              <Settings className="w-4 h-4" />
-              <span className="hidden lg:inline">雲端與維護</span>
+              {authUser?.photoURL ? (
+                <img
+                  src={authUser.photoURL}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  className="w-6 h-6 rounded-lg object-cover"
+                />
+              ) : (
+                <span className="w-6 h-6 rounded-lg bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 text-xs font-bold flex items-center justify-center">
+                  {userInitial}
+                </span>
+              )}
+              <span className="hidden xl:inline">設定與維護</span>
+              <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden sm:inline" />
             </button>
 
             {showSettingsMenu && (
-              <div className="absolute right-0 top-full mt-1.5 w-76 bg-white rounded-xl shadow-xl border border-slate-200 py-2 z-50 animate-fadeIn max-h-[82vh] overflow-y-auto custom-scrollbar">
+              <div className="absolute right-0 top-full mt-1.5 w-80 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 py-2 z-50 animate-fadeIn max-h-[82vh] overflow-y-auto custom-scrollbar">
                 {/* Account & Cloud Status Header */}
-                <div className="px-4 py-2 border-b border-slate-100">
+                <div className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800">
                   <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
                     目前工作區身分
                   </div>
                   {authUser ? (
                     <div className="mt-1">
-                      <div className="text-xs font-bold text-slate-900 truncate">
+                      <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
                         {authUser.displayName || authUser.email}
                       </div>
                       {authUser.email && (
-                        <div className="text-[11px] text-slate-500 truncate">{authUser.email}</div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {authUser.email}
+                        </div>
                       )}
-                      <div className="mt-2 flex items-center gap-1.5">
+                      <div className="mt-2.5 flex items-center gap-1.5">
                         <button
                           type="button"
                           disabled={isCloudSyncing}
@@ -2315,7 +2510,7 @@ const App: React.FC = () => {
                             setShowSettingsMenu(false);
                             handleManualCloudSync();
                           }}
-                          className="flex-1 py-1.5 px-2.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                          className="flex-1 py-1.5 px-2.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <CloudUpload className="w-3.5 h-3.5" />
                           <span>立即同步雲端</span>
@@ -2323,7 +2518,7 @@ const App: React.FC = () => {
                         <button
                           type="button"
                           onClick={handleSignOut}
-                          className="py-1.5 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                          className="py-1.5 px-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                           title="登出目前 Google 帳號"
                         >
                           <LogOut className="w-3.5 h-3.5" />
@@ -2333,17 +2528,17 @@ const App: React.FC = () => {
                     </div>
                   ) : (
                     <div className="mt-1">
-                      <div className="text-xs font-bold text-slate-800">
+                      <div className="text-xs font-bold text-slate-800 dark:text-slate-100">
                         免登入本機體驗模式
                       </div>
-                      <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
                         資料儲存在目前瀏覽器，登入 Google 可開啟跨裝置加密雲端同步。
                       </p>
-                      <div className="mt-2 flex items-center gap-1.5">
+                      <div className="mt-2.5 flex items-center gap-1.5">
                         <button
                           type="button"
                           onClick={handleSwitchToGoogleLogin}
-                          className="flex-1 py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                          className="flex-1 py-1.5 px-2.5 rounded-lg bg-slate-900 dark:bg-indigo-600 hover:bg-slate-800 dark:hover:bg-indigo-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <LogIn className="w-3.5 h-3.5" />
                           <span>連結 Google 雲端</span>
@@ -2351,7 +2546,7 @@ const App: React.FC = () => {
                         <button
                           type="button"
                           onClick={handleSignOut}
-                          className="py-1.5 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                          className="py-1.5 px-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors cursor-pointer"
                         >
                           返回首頁
                         </button>
@@ -2360,66 +2555,52 @@ const App: React.FC = () => {
                   )}
                 </div>
 
-                <div className="px-4 py-1.5 text-xs font-bold text-slate-500 tracking-wide">
-                  教學、示範與永續揭露
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowSettingsMenu(false);
-                    setShowUserGuideModal(true);
-                  }}
-                  className="w-full text-left px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 flex items-center gap-2.5 transition-colors cursor-pointer"
-                >
-                  <BookOpen className="w-4 h-4 shrink-0" />
-                  <span>開啟完整使用教學指南</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleStartInteractiveTour}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center gap-2.5 transition-colors cursor-pointer"
-                >
-                  <RotateCcw className="w-4 h-4 text-slate-500 shrink-0" />
-                  <span>重看教學（互動步驟導覽）</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowSettingsMenu(false);
-                    setShowImpactModal(true);
-                  }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-emerald-800 hover:bg-emerald-50/70 flex items-center gap-2.5 transition-colors cursor-pointer"
-                >
-                  <Leaf className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>無紙化減碳統計與 AI 揭露</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowSettingsMenu(false);
-                    handleLoadDemoCards();
-                  }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center gap-2.5 transition-colors cursor-pointer"
-                >
-                  <Database className="w-4 h-4 text-indigo-600 shrink-0" />
-                  <span>載入 6 筆跨領域示範名片</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCycleFontScale}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center justify-between transition-colors cursor-pointer"
-                >
-                  <span className="flex items-center gap-2.5">
-                    <Type className="w-4 h-4 text-slate-500 shrink-0" />
-                    <span>切換全站字級大小</span>
-                  </span>
-                  <span className="text-xs font-bold text-indigo-700">
-                    {fontScale === 'large' ? '大字級' : fontScale === 'comfortable' ? '舒適' : '標準'}
-                  </span>
-                </button>
+                {/* Theme & Font Scale Controls */}
+                <div className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                      外觀主題
+                    </span>
+                    <div className="flex items-center gap-0.5 bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg border border-slate-200 dark:border-slate-700">
+                      {[
+                        { id: 'light' as ThemePreference, label: '淺色', Icon: Sun },
+                        { id: 'dark' as ThemePreference, label: '深色', Icon: Moon },
+                        { id: 'system' as ThemePreference, label: '系統', Icon: Monitor },
+                      ].map(({ id, label, Icon }) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => setTheme(id)}
+                          className={`px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                            theme === id
+                              ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-2xs'
+                              : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                          }`}
+                        >
+                          <Icon className="w-3 h-3" />
+                          <span>{label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
-                <div className="h-px bg-slate-100 my-1.5" />
-                <div className="px-4 py-1 text-xs font-bold text-slate-500 tracking-wide">
+                  <button
+                    type="button"
+                    onClick={handleCycleFontScale}
+                    className="w-full text-left py-1 text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center justify-between cursor-pointer"
+                  >
+                    <span className="flex items-center gap-2 font-bold text-slate-600 dark:text-slate-300">
+                      <Type className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                      <span>全站字級大小</span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-bold">
+                      {fontScale === 'large' ? '大字級' : fontScale === 'comfortable' ? '舒適' : '標準'}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Data Quality Maintenance */}
+                <div className="px-4 pt-2 pb-1 text-[11px] font-bold text-slate-400 tracking-wide">
                   資料品質維護
                 </div>
                 <button
@@ -2429,7 +2610,7 @@ const App: React.FC = () => {
                     setShowSettingsMenu(false);
                     handleAutoUprightAllCards();
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 flex items-center gap-2.5 transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 flex items-center gap-2.5 transition-colors cursor-pointer"
                 >
                   <RotateCw className="w-4 h-4 shrink-0" />
                   <span>自動翻正全部名片影像</span>
@@ -2441,14 +2622,14 @@ const App: React.FC = () => {
                     setShowSettingsMenu(false);
                     handleBatchReorganizeDualSideCards();
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center justify-between transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between transition-colors cursor-pointer"
                 >
                   <span className="flex items-center gap-2.5">
-                    <FlipHorizontal2 className="w-4 h-4 text-indigo-600 shrink-0" />
+                    <FlipHorizontal2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
                     <span>批次重整雙面名片</span>
                   </span>
                   {cards.filter((c) => Boolean(c.backImageUrl)).length > 0 && (
-                    <span className="text-xs font-bold text-indigo-700 tabular-nums">
+                    <span className="text-xs font-bold text-indigo-700 dark:text-indigo-300 tabular-nums">
                       {cards.filter((c) => Boolean(c.backImageUrl)).length}
                     </span>
                   )}
@@ -2459,14 +2640,14 @@ const App: React.FC = () => {
                     setShowSettingsMenu(false);
                     handleAutoFixQsCategories();
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center justify-between transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between transition-colors cursor-pointer"
                 >
                   <span className="flex items-center gap-2.5">
                     <ShieldCheck className="w-4 h-4 text-slate-500 shrink-0" />
                     <span>執行聯絡人分類與國別健檢</span>
                   </span>
                   {boundQsSummary.auditIssues.length > 0 && (
-                    <span className="text-xs font-bold text-amber-700 tabular-nums">
+                    <span className="text-xs font-bold text-amber-700 dark:text-amber-400 tabular-nums">
                       {boundQsSummary.auditIssues.length}
                     </span>
                   )}
@@ -2477,7 +2658,7 @@ const App: React.FC = () => {
                     setShowSettingsMenu(false);
                     handleStandardizeAllCountries();
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center gap-2.5 transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
                 >
                   <Sparkles className="w-4 h-4 text-slate-500 shrink-0" />
                   <span>統一國際標準國家名稱</span>
@@ -2485,35 +2666,46 @@ const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleFindDuplicates}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center justify-between transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between transition-colors cursor-pointer"
                 >
                   <span className="flex items-center gap-2.5">
                     <Layers className="w-4 h-4 text-slate-500 shrink-0" />
                     <span>尋找並合併重複名片</span>
                   </span>
                   {duplicateAnalysis.totalDuplicateCount > 0 && (
-                    <span className="text-xs font-bold text-amber-700 tabular-nums">
+                    <span className="text-xs font-bold text-amber-700 dark:text-amber-400 tabular-nums">
                       {duplicateAnalysis.totalDuplicateCount}
                     </span>
                   )}
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    setShowSettingsMenu(false);
+                    handleLoadDemoCards();
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <Database className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>載入 6 筆跨領域示範名片</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleRemoveNoImageCards}
-                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 flex items-center gap-2.5 transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
                 >
                   <ImageOff className="w-4 h-4 text-slate-500 shrink-0" />
                   <span>移除無影像名片</span>
                 </button>
 
-                <div className="h-px bg-slate-100 my-1.5" />
+                <div className="h-px bg-slate-100 dark:bg-slate-800 my-1.5" />
                 <button
                   type="button"
                   onClick={() => {
                     setShowSettingsMenu(false);
                     handleClearAll();
                   }}
-                  className="w-full text-left px-4 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 flex items-center gap-2.5 transition-colors cursor-pointer"
+                  className="w-full text-left px-4 py-2 text-sm font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 flex items-center gap-2.5 transition-colors cursor-pointer"
                 >
                   <Trash2 className="w-4 h-4 shrink-0" />
                   <span>清空目前名片資料</span>
@@ -2522,18 +2714,18 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* Secondary Camera Trigger */}
+          {/* Secondary Camera Trigger (Desktop) */}
           <button
             type="button"
             onClick={() => {
               setCameraTarget('new_card');
               setViewMode('camera');
             }}
-            className="h-10 px-3 rounded-lg text-sm font-semibold bg-white border border-slate-300 text-slate-800 hover:bg-slate-50 transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-            title="開啟相機拍攝名片"
+            className="hidden sm:flex h-9 px-3 rounded-xl text-sm font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors items-center gap-1.5 whitespace-nowrap cursor-pointer"
+            title="開啟相機拍攝名片（支援連拍）"
           >
             <Camera className="w-4 h-4" />
-            <span className="hidden sm:inline">拍照</span>
+            <span>拍照</span>
           </button>
 
           {/* Single Primary CTA */}
@@ -2541,7 +2733,7 @@ const App: React.FC = () => {
             id="btn-upload"
             type="button"
             onClick={handleAddClick}
-            className="h-10 px-4 rounded-lg text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-2xs"
+            className="h-9 px-3.5 rounded-xl text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-xs"
           >
             <Plus className="w-4 h-4" />
             <span>新增名片</span>
@@ -2581,96 +2773,42 @@ const App: React.FC = () => {
             onAutoUprightAll={handleAutoUprightAllCards}
             onBatchReorganizeDualSide={handleBatchReorganizeDualSideCards}
             onLoadDemoCards={handleLoadDemoCards}
+            onTriggerUpload={handleAddClick}
             dualSideReorgProgress={dualSideReorgProgress}
             isExporting={isExporting}
             isAutoUprighting={isAutoUprighting}
+            searchInputRef={searchInputRef}
           />
         ) : (
           <>
-            {/* Left Sidebar (Card List & Scan Queue) */}
+            {/* Left Sidebar (Collapsible on Desktop; Queue now lives globally in ScanQueueDock) */}
             <aside
               className={`${
-                isMobile ? (viewMode === 'file' ? 'flex' : 'hidden') : 'flex'
-              } w-full md:w-[330px] lg:w-[370px] flex-col bg-white border-r border-slate-200 shrink-0 z-10`}
+                isMobile
+                  ? viewMode === 'file'
+                    ? 'flex'
+                    : 'hidden'
+                  : isSidebarCollapsed
+                  ? 'hidden'
+                  : 'flex'
+              } w-full md:w-[320px] lg:w-[355px] flex-col bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 shrink-0 z-10`}
             >
-              {/* Active Scan Queue Strip (Shown only when tasks exist) */}
-              {tasks.length > 0 && (
-                <div className="px-3.5 py-3 bg-slate-50 border-b border-slate-200">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-slate-700 tabular-nums">
-                      辨識佇列 ({tasks.filter((t) => t.status === 'completed').length}/
-                      {tasks.length})
-                    </span>
-                    {tasks.every((t) => t.status === 'completed' || t.status === 'error') && (
-                      <button
-                        type="button"
-                        onClick={() => setTasks([])}
-                        className="text-xs font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
-                      >
-                        清除紀錄
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1">
-                    {tasks.map((task) => (
-                      <div
-                        key={task.id}
-                        onClick={() => task.status === 'error' && handleRetryTask(task.id)}
-                        className={`relative w-11 h-11 rounded-lg bg-white border border-slate-200 shrink-0 overflow-hidden ${
-                          task.status === 'error' ? 'cursor-pointer ring-1 ring-rose-500' : ''
-                        }`}
-                        title={
-                          task.status === 'error'
-                            ? `${task.fileName} 失敗：點擊重試`
-                            : task.fileName
-                        }
-                      >
-                        {task.previewUrl ? (
-                          <img
-                            src={task.previewUrl}
-                            alt=""
-                            className="w-full h-full object-contain bg-slate-100"
-                          />
-                        ) : (
-                          <div className="w-full h-full bg-slate-100" />
-                        )}
-                        {task.status === 'processing' && (
-                          <div className="absolute inset-0 bg-slate-900/45 flex items-center justify-center">
-                            <Loader2 className="w-4 h-4 text-white animate-spin" />
-                          </div>
-                        )}
-                        {task.status === 'completed' && (
-                          <div className="absolute inset-0 bg-emerald-600/80 flex items-center justify-center">
-                            <Check className="w-4 h-4 text-white" />
-                          </div>
-                        )}
-                        {task.status === 'error' && (
-                          <div className="absolute inset-0 bg-rose-600/85 flex items-center justify-center">
-                            <RefreshCw className="w-4 h-4 text-white" />
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               {/* Sidebar Filters */}
-              <div className="p-3.5 border-b border-slate-200 space-y-2.5">
+              <div className="p-3.5 border-b border-slate-200 dark:border-slate-800 space-y-2.5">
                 <div className="relative">
-                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="快速篩選工作台列表..."
-                    className="w-full pl-9 pr-8 py-2 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 placeholder:text-slate-500 focus:border-indigo-600 focus:outline-none"
+                    className="w-full pl-9 pr-8 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:bg-white dark:focus:bg-slate-900 focus:border-indigo-500 focus:outline-none"
                   />
                   {searchQuery && (
                     <button
                       type="button"
                       onClick={() => setSearchQuery('')}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 text-sm cursor-pointer"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 text-sm cursor-pointer"
                     >
                       ×
                     </button>
@@ -2681,7 +2819,7 @@ const App: React.FC = () => {
                   <select
                     value={activeCategory}
                     onChange={(e) => setActiveCategory(e.target.value as any)}
-                    className="px-2.5 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-800 outline-none cursor-pointer"
+                    className="px-2.5 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
                   >
                     <option value="all">全部分類 ({cards.length})</option>
                     <option value="employer">企業夥伴</option>
@@ -2693,7 +2831,7 @@ const App: React.FC = () => {
                   <select
                     value={activeCountry}
                     onChange={(e) => setActiveCountry(e.target.value)}
-                    className="px-2.5 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-800 outline-none cursor-pointer"
+                    className="px-2.5 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
                   >
                     <option value="all">全部國家</option>
                     {sidebarCountries.map(([ctry, count]) => (
@@ -2704,12 +2842,12 @@ const App: React.FC = () => {
                   </select>
                 </div>
 
-                <div className="flex items-center justify-between pt-0.5 text-xs text-slate-600">
+                <div className="flex items-center justify-between pt-0.5 text-xs text-slate-500 dark:text-slate-400">
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
                       onClick={() => handleSelectCategory('all')}
-                      className="text-indigo-700 hover:underline font-semibold cursor-pointer"
+                      className="text-indigo-700 dark:text-indigo-400 hover:underline font-semibold cursor-pointer"
                     >
                       勾選已分類夥伴
                     </button>
@@ -2719,7 +2857,7 @@ const App: React.FC = () => {
                         <button
                           type="button"
                           onClick={handleDeselectAll}
-                          className="text-slate-600 hover:text-rose-600 font-medium cursor-pointer"
+                          className="text-slate-500 hover:text-rose-600 font-medium cursor-pointer"
                         >
                           取消 ({selectedCardIds.size})
                         </button>
@@ -2732,7 +2870,7 @@ const App: React.FC = () => {
 
               {/* Card List */}
               <div
-                className="flex-1 overflow-y-auto custom-scrollbar p-2.5 space-y-2 bg-slate-50/50"
+                className="flex-1 overflow-y-auto custom-scrollbar p-2.5 space-y-2 bg-slate-50/50 dark:bg-slate-950/60"
                 onScroll={(e) => {
                   const target = e.currentTarget;
                   if (target.scrollTop + target.clientHeight >= target.scrollHeight - 200) {
@@ -2743,8 +2881,8 @@ const App: React.FC = () => {
                 }}
               >
                 {visibleCards.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-44 text-slate-500 text-center px-4">
-                    <p className="text-sm font-medium text-slate-600">
+                  <div className="flex flex-col items-center justify-center h-44 text-slate-500 dark:text-slate-400 text-center px-4">
+                    <p className="text-sm font-medium">
                       {searchQuery || activeCategory !== 'all' || activeCountry !== 'all'
                         ? '沒有符合篩選條件的名片'
                         : '目前尚無名片紀錄'}
@@ -2775,7 +2913,7 @@ const App: React.FC = () => {
                             Math.min(visibleCards.length, prev + 100)
                           )
                         }
-                        className="w-full py-2.5 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-sm font-semibold border border-slate-300 transition-colors cursor-pointer tabular-nums"
+                        className="w-full py-2.5 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl text-sm font-semibold border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer tabular-nums"
                       >
                         載入更多名片 (剩餘 {visibleCards.length - sidebarDisplayLimit} 筆)
                       </button>
@@ -2787,14 +2925,31 @@ const App: React.FC = () => {
 
             {/* Right Review Studio Area */}
             <main
-              className={`flex-1 flex flex-col min-w-0 relative bg-slate-50 ${
+              className={`flex-1 flex flex-col min-w-0 relative bg-slate-50 dark:bg-slate-950 ${
                 isMobile && viewMode === 'file' ? 'hidden' : 'flex'
               }`}
             >
               {/* Contextual Detail Action Bar */}
               {(viewMode === 'detail' || viewMode === 'file') && formData && (
-                <div className="min-h-[52px] border-b border-slate-200 bg-white px-4 lg:px-6 py-2 flex items-center justify-between gap-3 shrink-0">
-                  <div className="flex items-center gap-2.5 min-w-0">
+                <div className="min-h-[52px] border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 lg:px-5 py-2 flex items-center justify-between gap-3 shrink-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {/* Desktop Sidebar Collapse Toggle for wider dual-side review */}
+                    {!isMobile && (
+                      <button
+                        type="button"
+                        onClick={() => setIsSidebarCollapsed((c) => !c)}
+                        className="w-8 h-8 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center transition-colors shrink-0 cursor-pointer"
+                        title={isSidebarCollapsed ? '展開左側名片清單' : '收合左側名片清單'}
+                        aria-label={isSidebarCollapsed ? '展開左側名片清單' : '收合左側名片清單'}
+                      >
+                        {isSidebarCollapsed ? (
+                          <PanelLeftOpen className="w-4 h-4" />
+                        ) : (
+                          <PanelLeftClose className="w-4 h-4" />
+                        )}
+                      </button>
+                    )}
+
                     {(isMobile || openedFromSearch) && (
                       <button
                         type="button"
@@ -2806,15 +2961,15 @@ const App: React.FC = () => {
                             setViewMode('file');
                           }
                         }}
-                        className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-sm font-semibold flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer whitespace-nowrap"
+                        className="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer whitespace-nowrap"
                       >
-                        <ArrowLeft className="w-4 h-4" />
+                        <ArrowLeft className="w-3.5 h-3.5" />
                         <span>{openedFromSearch ? '返回資料庫' : '返回列表'}</span>
                       </button>
                     )}
 
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <h2 className="text-base font-bold font-display text-slate-900 truncate">
+                      <h2 className="text-base font-bold font-display text-slate-900 dark:text-white truncate">
                         {formData.firstName || formData.lastName
                           ? `${formData.firstName} ${formData.lastName}`.trim()
                           : formData.company || '未知名片'}
@@ -2824,13 +2979,13 @@ const App: React.FC = () => {
                       <span className="hidden sm:inline-flex items-center gap-1 text-xs font-semibold text-slate-500 shrink-0">
                         {saveStatus === 'saving' ? (
                           <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
-                            <span className="text-indigo-700">自動儲存中...</span>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600 dark:text-indigo-400" />
+                            <span className="text-indigo-700 dark:text-indigo-300">儲存中...</span>
                           </>
                         ) : saveStatus === 'saved' ? (
                           <>
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                            <span className="text-emerald-700">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                            <span className="text-emerald-700 dark:text-emerald-300">
                               {authUser ? '已同步儲存' : '已自動儲存'}
                             </span>
                           </>
@@ -2842,21 +2997,21 @@ const App: React.FC = () => {
                   </div>
 
                   {/* Detail Action Controls */}
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={() => handleToggleCardSelect(formData.id)}
-                      className={`h-9 px-3 rounded-lg text-sm font-semibold transition-colors flex items-center gap-1.5 border cursor-pointer whitespace-nowrap ${
+                      className={`h-8 px-2.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 border cursor-pointer whitespace-nowrap ${
                         selectedCardIds.has(formData.id)
-                          ? 'bg-indigo-50 text-indigo-800 border-indigo-300'
-                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                          ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-200 border-indigo-300 dark:border-indigo-700'
+                          : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
                       }`}
                       title="勾選至批次編輯或報表匯出名單"
                     >
                       {selectedCardIds.has(formData.id) ? (
-                        <CheckSquare className="w-4 h-4 text-indigo-600" />
+                        <CheckSquare className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
                       ) : (
-                        <Square className="w-4 h-4 text-slate-500" />
+                        <Square className="w-3.5 h-3.5 text-slate-400" />
                       )}
                       <span className="hidden lg:inline">勾選</span>
                     </button>
@@ -2864,21 +3019,21 @@ const App: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setQrModalCard(formData)}
-                      className="h-9 px-3 rounded-lg text-sm font-semibold bg-white border border-slate-300 text-slate-800 hover:bg-slate-50 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                      className="h-8 px-2.5 rounded-lg text-xs font-semibold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                       title="顯示 vCard 電子名片 QR Code (快捷鍵 Q)"
                     >
-                      <QrCode className="w-4 h-4 text-indigo-600" />
+                      <QrCode className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
                       <span className="hidden xl:inline">QR 名片</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => setEmailDrawerCard(formData)}
-                      className="h-9 px-3 rounded-lg text-sm font-semibold bg-white border border-slate-300 text-slate-800 hover:bg-slate-50 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                      className="h-8 px-2.5 rounded-lg text-xs font-semibold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                       title="撰寫會後問候跟進信草稿 (快捷鍵 E)"
                     >
-                      <Mail className="w-4 h-4 text-indigo-600" />
-                      <span className="hidden xl:inline">問候信草稿</span>
+                      <Mail className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                      <span className="hidden xl:inline">問候信</span>
                     </button>
 
                     {isMobile ? (
@@ -2886,19 +3041,19 @@ const App: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => setShowShareMenu((p) => !p)}
-                          className="h-9 w-9 rounded-lg border border-slate-300 bg-white text-slate-700 flex items-center justify-center cursor-pointer"
+                          className="h-8 w-8 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center justify-center cursor-pointer"
                         >
-                          <Share2 className="w-4 h-4" />
+                          <Share2 className="w-3.5 h-3.5" />
                         </button>
                         {showShareMenu && (
-                          <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50">
+                          <div className="absolute right-0 top-full mt-1.5 w-48 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1.5 z-50">
                             <button
                               type="button"
                               onClick={() => {
                                 handleShare(true);
                                 setShowShareMenu(false);
                               }}
-                              className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
+                              className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
                             >
                               分享名片 (含簡介)
                             </button>
@@ -2908,7 +3063,7 @@ const App: React.FC = () => {
                                 handleShare(false);
                                 setShowShareMenu(false);
                               }}
-                              className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
+                              className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
                             >
                               分享名片 (僅聯絡資訊)
                             </button>
@@ -2921,23 +3076,23 @@ const App: React.FC = () => {
                           type="button"
                           onClick={() => handleExport('single')}
                           disabled={isExporting}
-                          className="h-9 px-3 rounded-lg text-sm font-semibold bg-white border border-slate-300 text-slate-800 hover:bg-slate-50 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                          className="h-8 px-2.5 rounded-lg text-xs font-semibold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                           title="匯出此張名片 Excel"
                         >
-                          <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                           <span className="hidden xl:inline">匯出單筆</span>
                         </button>
 
                         {authUser ? (
-                          <span className="hidden xl:inline-flex h-9 px-3 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 items-center gap-1.5 whitespace-nowrap">
-                            <Cloud className="w-3.5 h-3.5 text-emerald-600" />
+                          <span className="hidden 2xl:inline-flex h-8 px-2.5 rounded-lg text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 items-center gap-1.5 whitespace-nowrap">
+                            <Cloud className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                             <span>雲端自動同步</span>
                           </span>
                         ) : (
                           <button
                             type="button"
                             onClick={handleSwitchToGoogleLogin}
-                            className="hidden xl:inline-flex h-9 px-3 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                            className="hidden 2xl:inline-flex h-8 px-2.5 rounded-lg text-xs font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 text-slate-700 dark:text-slate-200 hover:text-indigo-700 border border-slate-200 dark:border-slate-700 items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
                             title="登入 Google 帳號以啟用跨裝置雲端備份"
                           >
                             <CloudUpload className="w-3.5 h-3.5" />
@@ -2950,7 +3105,7 @@ const App: React.FC = () => {
                     <button
                       type="button"
                       onClick={(e) => handleDeleteCard(e, formData.id)}
-                      className="h-9 w-9 flex items-center justify-center text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                      className="h-8 w-8 flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
                       title="刪除此筆名片"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -2969,7 +3124,9 @@ const App: React.FC = () => {
                         setCameraTarget('new_card');
                         setViewMode(formData ? 'detail' : 'file');
                       }}
+                      onPickFromAlbum={() => fileInputRef.current?.click()}
                       isMobile={isMobile}
+                      allowBurstMode={cameraTarget === 'new_card'}
                       modeLabel={
                         cameraTarget === 'back_side'
                           ? '請將名片反面置於框內拍攝'
@@ -2992,6 +3149,9 @@ const App: React.FC = () => {
                       if (pdfDoc) renderPdfPage(pdfDoc, nextPage);
                     }}
                     onRotateImage={handleRotateCropImage}
+                    onReDetect={() => {
+                      if (cropperImage) autoDetectInCropper(cropperImage.split(',')[1]);
+                    }}
                     onCancel={() => {
                       setViewMode(formData ? 'detail' : 'file');
                       setCropperImage(null);
@@ -3018,19 +3178,20 @@ const App: React.FC = () => {
                       setCameraTarget('back_side');
                       setViewMode('camera');
                     }}
+                    onOpenEmailDrawer={(c) => setEmailDrawerCard(c)}
                     onProcessBackSideExtraction={handleProcessBackSideExtraction}
                   />
                 ) : (
-                  /* Professional SaaS Empty Workspace */
-                  <div className="h-full flex flex-col items-center justify-center p-6 sm:p-8 text-center bg-slate-50">
-                    <div className="max-w-lg w-full bg-white border border-slate-200 rounded-2xl p-7 sm:p-8 shadow-2xs">
-                      <div className="w-12 h-12 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mx-auto mb-4">
+                  /* Actionable Empty Workspace */
+                  <div className="h-full flex flex-col items-center justify-center p-6 sm:p-8 text-center bg-slate-50 dark:bg-slate-950">
+                    <div className="max-w-lg w-full bg-white dark:bg-slate-900 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-7 sm:p-8 shadow-2xs">
+                      <div className="w-12 h-12 rounded-2xl bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-100 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto mb-4">
                         <Upload className="w-5 h-5" />
                       </div>
-                      <h2 className="text-xl font-bold font-display text-slate-900 mb-2">
+                      <h2 className="text-xl font-bold font-display text-slate-900 dark:text-white mb-2">
                         名片審閱與數位化工作台
                       </h2>
-                      <p className="text-sm text-slate-600 leading-relaxed mb-6">
+                      <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed mb-6">
                         請從左側列表選擇聯絡人進行審閱編輯，或直接將名片圖片 (JPG, PNG)、多頁掃描 PDF 拖曳至此處自動擷取欄位。
                       </p>
 
@@ -3049,29 +3210,10 @@ const App: React.FC = () => {
                             setCameraTarget('new_card');
                             setViewMode('camera');
                           }}
-                          className="py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          className="py-2.5 px-4 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
                         >
                           <Camera className="w-4 h-4" />
                           <span>開啟相機拍攝</span>
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-3">
-                        <button
-                          type="button"
-                          onClick={() => setShowUserGuideModal(true)}
-                          className="py-2 px-3 bg-slate-50 hover:bg-indigo-50 text-slate-700 hover:text-indigo-800 border border-slate-200 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                        >
-                          <BookOpen className="w-4 h-4 text-indigo-600" />
-                          <span>閱讀使用教學</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleStartInteractiveTour}
-                          className="py-2 px-3 bg-slate-50 hover:bg-indigo-50 text-slate-700 hover:text-indigo-800 border border-slate-200 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                        >
-                          <RotateCcw className="w-4 h-4 text-indigo-600" />
-                          <span>重看互動教學</span>
                         </button>
                       </div>
 
@@ -3079,7 +3221,7 @@ const App: React.FC = () => {
                         <button
                           type="button"
                           onClick={handleLoadDemoCards}
-                          className="mt-3 w-full py-2.5 px-4 bg-indigo-50/70 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          className="mt-3 w-full py-2.5 px-4 bg-indigo-50/70 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
                         >
                           <Sparkles className="w-4 h-4" />
                           <span>載入 6 筆示範名片快速體驗</span>
@@ -3093,6 +3235,84 @@ const App: React.FC = () => {
           </>
         )}
       </div>
+
+      {/* =========================================================
+          MOBILE THUMB-ZONE BOTTOM NAVIGATION BAR (< 768px)
+         ========================================================= */}
+      {isMobile && viewMode !== 'camera' && viewMode !== 'cropper' && (
+        <nav
+          aria-label="行動端主導覽"
+          className="md:hidden shrink-0 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 px-2 pt-1.5 pb-safe grid grid-cols-5 items-center z-30"
+        >
+          <button
+            type="button"
+            onClick={async () => {
+              await flushPendingSave();
+              setViewMode('search');
+            }}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 rounded-xl text-[11px] font-semibold transition-colors cursor-pointer ${
+              viewMode === 'search'
+                ? 'text-indigo-600 dark:text-indigo-400'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <Database className="w-5 h-5" />
+            <span>名片庫</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setViewMode(formData ? 'detail' : 'file')}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 rounded-xl text-[11px] font-semibold transition-colors cursor-pointer ${
+              viewMode !== 'search'
+                ? 'text-indigo-600 dark:text-indigo-400'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <LayoutPanelLeft className="w-5 h-5" />
+            <span>工作台</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setCameraTarget('new_card');
+              setViewMode('camera');
+            }}
+            className="flex flex-col items-center justify-center -mt-4 cursor-pointer"
+            aria-label="拍攝名片"
+          >
+            <span className="w-12 h-12 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-500/30 flex items-center justify-center">
+              <Camera className="w-5 h-5" />
+            </span>
+            <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 mt-0.5">
+              拍攝
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsChatOpen((o) => !o)}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 rounded-xl text-[11px] font-semibold transition-colors cursor-pointer ${
+              isChatOpen
+                ? 'text-indigo-600 dark:text-indigo-400'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <MessageSquare className="w-5 h-5" />
+            <span>AI 助理</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowCommandPalette(true)}
+            className="flex flex-col items-center justify-center gap-0.5 py-1 rounded-xl text-[11px] font-semibold text-slate-500 dark:text-slate-400 transition-colors cursor-pointer"
+          >
+            <Search className="w-5 h-5" />
+            <span>快搜</span>
+          </button>
+        </nav>
+      )}
 
       {/* =========================================================
           OVERLAYS, MODALS & DRAWERS
@@ -3253,8 +3473,56 @@ const App: React.FC = () => {
           onBatchAddTag={handleBatchAddTag}
           onOpenQsModal={() => setIsQsModalOpen(true)}
           onClearSelection={handleDeselectAll}
+          isMobile={isMobile}
         />
       )}
+
+      {/* Global Persistent Scan / Upload Queue Dock (Visible across all views) */}
+      {viewMode !== 'camera' && (
+        <ScanQueueDock
+          tasks={tasks}
+          isPaused={isQueuePaused}
+          onTogglePause={() => setIsQueuePaused((p) => !p)}
+          onRetryTask={handleRetryTask}
+          onClearFinished={() => setTasks([])}
+          onSelectCompletedCard={(cardId) => {
+            selectCard(cardId);
+            setViewMode('detail');
+          }}
+          isMobile={isMobile}
+        />
+      )}
+
+      {/* Global ⌘K Spotlight Command Palette */}
+      <CommandPalette
+        isOpen={showCommandPalette}
+        onClose={() => setShowCommandPalette(false)}
+        cards={cards}
+        onSelectCard={(id) => {
+          selectCard(id);
+          setViewMode('detail');
+        }}
+        onSwitchView={async (mode) => {
+          await flushPendingSave();
+          setViewMode(mode === 'search' ? 'search' : formData ? 'detail' : 'file');
+        }}
+        onUpload={handleAddClick}
+        onOpenCamera={() => {
+          setCameraTarget('new_card');
+          setViewMode('camera');
+        }}
+        onOpenDuplicates={handleFindDuplicates}
+        onOpenQsReview={() => {
+          handleBindCompliantQsList();
+          setIsQsModalOpen(true);
+        }}
+        onOpenGuide={() => setShowUserGuideModal(true)}
+        onStartTour={handleStartInteractiveTour}
+        onOpenImpact={() => setShowImpactModal(true)}
+        theme={theme}
+        onCycleTheme={handleCycleTheme}
+        duplicateCount={duplicateAnalysis.totalDuplicateCount}
+      />
 
       {/* Onboarding Tour */}
       {tourStepIndex >= 0 && (
@@ -3352,6 +3620,11 @@ const App: React.FC = () => {
         }}
         externalSearchQuery={externalChatQuery}
         onExternalSearchConsumed={() => setExternalChatQuery(null)}
+        onIntentDetected={handleChatIntentDetected}
+        hasBatchBar={selectedCardIds.size > 0}
+        isMobile={isMobile}
+        externalOpen={isChatOpen}
+        onExternalOpenChange={setIsChatOpen}
       />
     </div>
   );

@@ -9,6 +9,21 @@
     <meta property="og:title" content="BizMind · AI 智慧名片與人脈管理平台">
     <meta property="og:description" content="結合 Gemini AI 多卡視覺辨識、雙面名片合併、無紙化電子名片交換與溫暖跟進信草擬的智慧人脈管理系統。">
 
+    <!-- Prevent dark-mode FOUC -->
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem('bizmind_theme_v1');
+          var isDark =
+            pref === 'dark' ||
+            (pref === 'system' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          if (isDark) document.documentElement.classList.add('dark');
+        } catch (e) {}
+      })();
+    </script>
+
     <!-- LINE Browser Redirect Strategy -->
     <script>
       if (/Line/i.test(navigator.userAgent)) {

@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-sans: "Public Sans", "Plus Jakarta Sans", "Noto Sans TC", -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif;
@@ -11,10 +12,25 @@
   --sab: env(safe-area-inset-bottom, 0px);
   --background: #f8fafc;
   --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-subtle: #f1f5f9;
   --foreground: #0f172a;
   --muted: #475569;
-  --border: #cbd5e1;
+  --border: #e2e8f0;
   --primary: #4f46e5;
+  color-scheme: light;
+}
+
+.dark {
+  --background: #0b1120;
+  --surface: #0f172a;
+  --surface-elevated: #1e293b;
+  --surface-subtle: #162033;
+  --foreground: #f1f5f9;
+  --muted: #94a3b8;
+  --border: #1e293b;
+  --primary: #6366f1;
+  color-scheme: dark;
 }
 
 html {
@@ -54,11 +70,19 @@ html, body {
 
 .font-display {
   font-family: var(--font-display);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+.pb-safe {
+  padding-bottom: max(0.5rem, var(--sab));
+}
+
+.pt-safe {
+  padding-top: var(--sat);
 }
 
 button:focus-visible,
@@ -66,10 +90,11 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid #4f46e5;
-  outline-offset: 1px;
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
+/* Custom Scrollbar */
 .custom-scrollbar::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -92,25 +117,63 @@ textarea:focus-visible {
   background-clip: padding-box;
 }
 
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* 3D Card Flip Helpers */
+.perspective-1000 {
+  perspective: 1000px;
+}
+
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+
+.backface-hidden {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.rotate-y-180 {
+  transform: rotateY(180deg);
+}
+
+/* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(2px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes scaleUp {
-  from { opacity: 0; transform: scale(0.98); }
+  from { opacity: 0; transform: scale(0.97); }
   to { opacity: 1; transform: scale(1); }
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translate(-50%, 10px); }
+  from { opacity: 0; transform: translate(-50%, 12px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
 @keyframes scanLine {
-  0% { transform: translateY(0%); opacity: 0.2; }
-  50% { opacity: 0.9; }
-  100% { transform: translateY(100%); opacity: 0.2; }
+  0% { top: 4%; opacity: 0.15; }
+  20% { opacity: 0.95; }
+  80% { opacity: 0.95; }
+  100% { top: 94%; opacity: 0.15; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes shutterFlash {
+  0% { opacity: 0.85; }
+  100% { opacity: 0; }
 }
 
 .animate-fadeIn {
@@ -122,13 +185,37 @@ textarea:focus-visible {
 }
 
 .animate-slideUp {
-  animation: slideUp 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: slideUp 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-scanLine {
+  animation: scanLine 2.4s ease-in-out infinite;
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.12) 25%, rgba(148, 163, 184, 0.24) 50%, rgba(148, 163, 184, 0.12) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s infinite;
+}
+
+.animate-shutterFlash {
+  animation: shutterFlash 260ms ease-out forwards;
+}
+
+/* Touch devices: always expose action buttons that are hover-only on desktop */
+@media (hover: none), (pointer: coarse) {
+  .touch-visible {
+    opacity: 1 !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-fadeIn,
   .animate-scaleUp,
-  .animate-slideUp {
+  .animate-slideUp,
+  .animate-scanLine,
+  .animate-shimmer,
+  .animate-shutterFlash {
     animation: none !important;
   }
 }

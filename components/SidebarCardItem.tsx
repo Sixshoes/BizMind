@@ -1,5 +1,5 @@
 import React from 'react';
-import { Cloud, CheckCircle2, HardDrive, Trash2, FlipHorizontal2 } from 'lucide-react';
+import { Cloud, HardDrive, Trash2, FlipHorizontal2 } from 'lucide-react';
 import { BusinessCardData } from '../types';
 import { CardThumbnail } from './CardThumbnail';
 import { normalizeCountry } from '../utils/countries';
@@ -22,10 +22,10 @@ const CATEGORY_LABEL: Record<BusinessCardData['category'], string> = {
 };
 
 const CATEGORY_TEXT_CLS: Record<BusinessCardData['category'], string> = {
-  employer: 'text-blue-700',
-  academic: 'text-amber-700',
-  staff: 'text-emerald-700',
-  other: 'text-slate-600',
+  employer: 'text-blue-700 dark:text-blue-400',
+  academic: 'text-amber-700 dark:text-amber-400',
+  staff: 'text-emerald-700 dark:text-emerald-400',
+  other: 'text-slate-500 dark:text-slate-400',
 };
 
 export const SidebarCardItem: React.FC<SidebarCardItemProps> = React.memo(
@@ -47,15 +47,15 @@ export const SidebarCardItem: React.FC<SidebarCardItemProps> = React.memo(
       <div
         id={`card-list-item-${card.id}`}
         onClick={() => onSelect(card.id)}
-        className={`group flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors border select-none ${
+        className={`group relative flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all border select-none ${
           isSelected
-            ? 'bg-indigo-50/75 border-indigo-500 ring-1 ring-indigo-500/20'
+            ? 'bg-indigo-50/85 dark:bg-indigo-950/50 border-indigo-500 dark:border-indigo-500 ring-1 ring-indigo-500/20 shadow-2xs'
             : isQsChecked
-            ? 'bg-indigo-50/40 border-indigo-300'
-            : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'
+            ? 'bg-indigo-50/40 dark:bg-indigo-950/25 border-indigo-300 dark:border-indigo-800'
+            : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 hover:bg-slate-50/80 dark:hover:bg-slate-800/60'
         }`}
       >
-        {/* Checkbox for Multi-Select / QS */}
+        {/* Checkbox for Multi-Select */}
         <div
           className="flex items-center justify-center shrink-0 p-1.5 -m-1.5"
           onClick={(e) => {
@@ -72,26 +72,28 @@ export const SidebarCardItem: React.FC<SidebarCardItemProps> = React.memo(
           />
         </div>
 
-        {/* Thumbnail */}
-        <CardThumbnail card={card} size="md" className="rounded-md" />
+        {/* Authentic 1.6:1 Card Thumbnail */}
+        <CardThumbnail card={card} size="sm" />
 
         {/* Metadata */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 min-w-0">
-            <span className="text-[15px] font-bold text-slate-900 truncate leading-snug">
+            <span className="text-[14.5px] font-bold text-slate-900 dark:text-slate-100 truncate leading-snug">
               {displayName}
             </span>
             {card.backImageUrl && (
-              <span title="含雙面名片影像" className="text-slate-500 shrink-0">
+              <span title="含雙面名片影像" className="text-indigo-500 dark:text-indigo-400 shrink-0">
                 <FlipHorizontal2 className="w-3.5 h-3.5" />
               </span>
             )}
             {isDuplicate && (
-              <span className="text-xs font-bold text-amber-700 shrink-0">· 重複</span>
+              <span className="text-[11px] font-bold text-amber-700 dark:text-amber-400 shrink-0">
+                · 重複
+              </span>
             )}
           </div>
 
-          <div className="text-[13px] text-slate-600 truncate flex items-center gap-1.5 mt-0.5 leading-snug">
+          <div className="text-xs text-slate-600 dark:text-slate-400 truncate flex items-center gap-1.5 mt-0.5 leading-snug">
             <span
               className={`font-semibold shrink-0 ${CATEGORY_TEXT_CLS[card.category || 'employer']}`}
             >
@@ -102,7 +104,7 @@ export const SidebarCardItem: React.FC<SidebarCardItemProps> = React.memo(
             {normalizedCountry && (
               <>
                 <span className="text-slate-400 shrink-0">·</span>
-                <span className="truncate text-slate-600 shrink-0 max-w-[96px]">
+                <span className="truncate text-slate-500 dark:text-slate-400 shrink-0 max-w-[84px]">
                   {normalizedCountry}
                 </span>
               </>
@@ -111,29 +113,27 @@ export const SidebarCardItem: React.FC<SidebarCardItemProps> = React.memo(
         </div>
 
         {/* Sync Status & Delete Action */}
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-0.5 shrink-0">
           <span
-            className="w-7 h-7 flex items-center justify-center"
+            className="w-6 h-6 flex items-center justify-center"
             title={
-              card.syncStatus === 'firebase'
-                ? '已同步至個人雲端'
-                : '儲存在本機瀏覽器'
+              card.syncStatus === 'firebase' ? '已同步至個人雲端' : '儲存在本機瀏覽器'
             }
           >
             {card.syncStatus === 'firebase' ? (
-              <Cloud className="w-4 h-4 text-sky-600" />
+              <Cloud className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
             ) : (
-              <HardDrive className="w-4 h-4 text-slate-400" />
+              <HardDrive className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
             )}
           </span>
 
           <button
             type="button"
             onClick={(e) => onDelete(e, card.id)}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-600 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 hover:text-rose-600 opacity-0 group-hover:opacity-100 focus:opacity-100 touch-visible transition-opacity cursor-pointer"
             title="刪除名片"
           >
-            <Trash2 className="w-4 h-4" />
+            <Trash2 className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
