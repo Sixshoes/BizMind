@@ -7,7 +7,7 @@
     "dev": "tsx server.ts",
     "check-env": "tsx -e \"console.log(process.env.GEMINI_KEY)\"",
     "start": "tsx server.ts",
-    "build": "vite build && node scripts/bundle-api.mjs",
+    "build": "vite build",
     "lint": "tsc --noEmit",
     "preview": "vite preview"
   },

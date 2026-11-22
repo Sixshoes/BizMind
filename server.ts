@@ -4,8 +4,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { GoogleGenAI, Type } from '@google/genai';
 import { rateLimit } from 'express-rate-limit';
-import { normalizeCountry } from './utils/countries';
-import { detectCardClockwiseRotation } from './utils/cardOrientationServer';
+import { normalizeCountry } from './utils/countries.js';
+import { detectCardClockwiseRotation } from './utils/cardOrientationServer.js';
 
 dotenv.config({ override: true });
 
