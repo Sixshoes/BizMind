@@ -1,9 +1,30 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{uid}/cards/{cardId} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
     }
+
+    function isValidCardWrite() {
+      let data = request.resource.data;
+      return data.keys().size() <= 45
+        && data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && (!('ownerUid' in data) || data.ownerUid == request.auth.uid)
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 10000))
+        && (!('summary' in data) || (data.summary is string && data.summary.size() <= 4000));
+    }
+
+    match /users/{uid}/cards/{cardId} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isValidCardWrite();
+    }
+
+    match /users/{uid}/profile/{docId} {
+      allow read, write: if isOwner(uid);
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

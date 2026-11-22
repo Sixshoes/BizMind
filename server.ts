@@ -40,6 +40,171 @@ const getAiClient = () => {
 
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-4-hydrogen';
 const FALLBACK_MODELS = ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-2.5-flash'];
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'bizmind-7ff8a';
+const MAX_REMOTE_IMAGE_BYTES = 8 * 1024 * 1024;
+const REMOTE_FETCH_TIMEOUT_MS = 8000;
+
+interface BizMindAuthContext {
+  mode: 'user' | 'guest';
+  uid?: string;
+  sessionId?: string;
+}
+
+type AuthenticatedRequest = express.Request & {
+  bizmindAuth?: BizMindAuthContext;
+};
+
+let firebaseAdminAuthPromise: Promise<any | null> | null = null;
+
+async function getFirebaseAdminAuth(): Promise<any | null> {
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT) return null;
+  if (!firebaseAdminAuthPromise) {
+    firebaseAdminAuthPromise = (async () => {
+      try {
+        const adminModule: any = await import('firebase-admin');
+        const admin = adminModule.default || adminModule;
+        if (!admin.apps?.length) {
+          const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT!);
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+          });
+        }
+        return admin.auth();
+      } catch (err) {
+        console.warn('[AUTH] Failed to initialize firebase-admin, falling back to JWT claim checks:', err);
+        return null;
+      }
+    })();
+  }
+  return firebaseAdminAuthPromise;
+}
+
+function decodeJwtPayload(token: string): Record<string, any> | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function isTrustedOrigin(req: express.Request): boolean {
+  const originHeader = String(req.headers.origin || req.headers.referer || '').trim();
+  if (!originHeader) {
+    // Allow same-host calls when client header is present (e.g., server-side / localhost tools with explicit header)
+    return Boolean(req.headers['x-bizmind-client']);
+  }
+  try {
+    const url = new URL(originHeader);
+    const host = url.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host.endsWith('.vercel.app') ||
+      host === 'sixshoes.github.io'
+    ) {
+      return true;
+    }
+    const extraAllowed = String(process.env.ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (extraAllowed.some((allowed) => host === allowed || originHeader.toLowerCase().startsWith(allowed))) {
+      return true;
+    }
+    const reqHost = String(req.headers.host || '').split(':')[0].toLowerCase();
+    return Boolean(reqHost && host === reqHost);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SSRF-hardened remote image fetcher:
+ * Only allows HTTPS Firebase Storage URLs belonging to this BizMind project,
+ * forbids redirects, enforces timeout and strict 8MB size cap.
+ */
+async function safeFetchImageUrl(rawUrl: string): Promise<{ buffer: Buffer; contentType: string }> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('無效的影像網址格式');
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('僅允許透過 HTTPS 存取雲端名片影像');
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const allowedHost =
+    host === 'firebasestorage.googleapis.com' || host === 'storage.googleapis.com';
+  const belongsToProject = parsed.pathname.includes(FIREBASE_PROJECT_ID);
+
+  if (!allowedHost || !belongsToProject) {
+    throw new Error('為確保安全性，僅允許讀取本系統授權儲存空間之名片影像');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REMOTE_FETCH_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch(parsed.toString(), {
+      method: 'GET',
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      throw new Error(`無法讀取雲端影像 (${resp.status})`);
+    }
+    const contentType = resp.headers.get('content-type') || 'image/jpeg';
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      throw new Error('遠端資源並非有效影像格式');
+    }
+    const contentLength = Number(resp.headers.get('content-length') || '0');
+    if (contentLength > MAX_REMOTE_IMAGE_BYTES) {
+      throw new Error('遠端影像檔案過大（上限 8MB）');
+    }
+
+    const arrBuf = await resp.arrayBuffer();
+    if (arrBuf.byteLength > MAX_REMOTE_IMAGE_BYTES) {
+      throw new Error('遠端影像檔案過大（上限 8MB）');
+    }
+    return { buffer: Buffer.from(arrBuf), contentType };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function parseJsonResponseSafely(text: string | undefined, fallback: any = {}): any {
+  if (!text) return fallback;
+  const trimmed = text.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced?.[1]) {
+      try {
+        return JSON.parse(fenced[1].trim());
+      } catch {
+        // continue
+      }
+    }
+    const firstBrace = trimmed.indexOf('{');
+    const lastBrace = trimmed.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+      } catch {
+        // continue
+      }
+    }
+    return fallback;
+  }
+}
 
 async function generateContentWithFallback(ai: GoogleGenAI, params: { contents: any; config?: any }) {
   const candidates = Array.from(new Set([PRIMARY_MODEL, ...FALLBACK_MODELS]));
@@ -75,21 +240,108 @@ async function startServer() {
   app.use(compression());
   app.use(express.json({ limit: '50mb' }));
 
-  const apiLimiter = rateLimit({
+  const userApiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    message: { success: false, error: 'Too many requests, please try again later.' },
+    message: { success: false, error: '請求過於頻繁，請稍候再試。' },
+  });
+
+  const guestApiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 75,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: {
+      success: false,
+      error: '訪客體驗模式已達短期請求上限，請稍候或登入 Google 帳號以獲得完整配額。',
+    },
   });
 
   const heavyLimiter = rateLimit({
     windowMs: 60 * 1000,
-    limit: 200,
-    message: { success: false, error: 'Rate limit exceeded for AI services.' },
+    limit: 120,
+    message: { success: false, error: 'AI 服務短時間呼叫次數過多，請稍後再試。' },
   });
 
-  app.use('/api', apiLimiter);
+  // --- 0. API Health Check (unauthenticated for monitoring / cold-start probes) ---
+  app.get('/api/health', (_req, res) => {
+    const aiConfigured = Boolean(
+      normalizeSecret(process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || process.env.API_KEY)
+    );
+    res.json({
+      ok: true,
+      service: 'bizmind-api',
+      version: '2.4.0',
+      model: PRIMARY_MODEL,
+      aiConfigured,
+      firebaseAdminVerified: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT),
+      timestamp: Date.now(),
+    });
+  });
+
+  // --- API Auth & Origin Guard + Tiered Rate Limit ---
+  app.use('/api', async (req: AuthenticatedRequest, res, next) => {
+    if (req.path === '/health') return next();
+
+    const authHeader = String(req.headers.authorization || '').trim();
+    if (authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      if (token) {
+        const adminAuth = await getFirebaseAdminAuth();
+        if (adminAuth) {
+          try {
+            const decoded = await adminAuth.verifyIdToken(token);
+            req.bizmindAuth = { mode: 'user', uid: decoded.uid };
+            return userApiLimiter(req, res, next);
+          } catch {
+            return res.status(401).json({
+              success: false,
+              error: '登入憑證已過期或無效，請重新整理頁面或重新登入 Google 帳號。',
+            });
+          }
+        }
+
+        const payload = decodeJwtPayload(token);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const validClaims =
+          payload &&
+          payload.aud === FIREBASE_PROJECT_ID &&
+          payload.iss === `https://securetoken.google.com/${FIREBASE_PROJECT_ID}` &&
+          typeof payload.sub === 'string' &&
+          payload.sub.length > 0 &&
+          typeof payload.exp === 'number' &&
+          payload.exp > nowSec - 60;
+
+        if (validClaims) {
+          req.bizmindAuth = { mode: 'user', uid: payload.sub };
+          return userApiLimiter(req, res, next);
+        }
+        return res.status(401).json({
+          success: false,
+          error: '登入憑證無效或已過期，請重新登入。',
+        });
+      }
+    }
+
+    const guestSession = String(req.headers['x-bizmind-guest-session'] || '').trim();
+    const clientHeader = String(req.headers['x-bizmind-client'] || '').trim();
+    const trustedOrigin = isTrustedOrigin(req);
+
+    if (trustedOrigin && (guestSession || clientHeader)) {
+      req.bizmindAuth = {
+        mode: 'guest',
+        sessionId: guestSession.slice(0, 128) || 'browser-guest',
+      };
+      return guestApiLimiter(req, res, next);
+    }
+
+    return res.status(401).json({
+      success: false,
+      error: '未授權的 API 存取，請透過 BizMind 應用程式介面操作。',
+    });
+  });
 
   // --- 1. API: Auto-upright card orientation ---
   app.post('/api/cards/auto-upright', heavyLimiter, async (req, res) => {
@@ -141,11 +393,8 @@ async function startServer() {
             return det ? det.recommendedRotation : curRot;
           }
           if (src.startsWith('http')) {
-            const resp = await fetch(src);
-            if (!resp.ok) return curRot;
-            const buf = Buffer.from(await resp.arrayBuffer());
-            const ct = resp.headers.get('content-type') || 'image/jpeg';
-            const det = detectCardClockwiseRotation(buf, ct, curRot);
+            const { buffer, contentType } = await safeFetchImageUrl(src);
+            const det = detectCardClockwiseRotation(buffer, contentType, curRot);
             return det ? det.recommendedRotation : curRot;
           }
         } catch {
@@ -195,7 +444,7 @@ async function startServer() {
   // --- 2. API: Gemini OCR, Dual-Side Merge & Follow-up Email ---
   app.post('/api/analyze-card', async (req, res) => {
     try {
-      const { action, image, imageUrl, mimeType, card, cards } = req.body;
+      const { action, image, imageUrl, mimeType, card, cards, rawText, audioBase64 } = req.body;
       const ai = getAiClient();
 
       if (action === 'summaryFromText') {
@@ -257,9 +506,10 @@ async function startServer() {
    - "academic"：學研專家（大學教授、學者、研究員、講師、學術研究機構專家）
    - "staff"：機關社團（政府機關、公部門、非營利組織、基金會、協會學會或機構行政窗口）
    - "other"：一般聯絡人（無個人姓名的通用名片或其他個人聯絡資訊）
-8. **AI 生成欄位**：
+8. **AI 生成欄位與信心度**：
    - summary (名片簡介)：約 50-100 字繁體中文，流暢專業地介紹該聯絡人與所屬機構角色（缺少的資訊直接略過，絕不寫「未提供」）。
-   - reasoning (分類依據)：繁體中文簡述歸類至該聯絡人分類的判斷理由。`,
+   - reasoning (分類依據)：繁體中文簡述歸類至該聯絡人分類的判斷理由。
+   - confidence (欄位辨識信心度)：針對 name, title, company, email, phone 評估圖片清晰度與辨識把握度（"high" / "medium" / "low"），若字跡模糊、反光或難以確定請標為 "low"。`,
               },
             ],
           },
@@ -285,6 +535,16 @@ async function startServer() {
                 category: { type: Type.STRING, enum: ['employer', 'academic', 'staff', 'other'] },
                 summary: { type: Type.STRING },
                 reasoning: { type: Type.STRING },
+                confidence: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                    title: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                    company: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                    email: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                    phone: { type: Type.STRING, enum: ['high', 'medium', 'low'] },
+                  },
+                },
                 translations: {
                   type: Type.OBJECT,
                   properties: {
@@ -310,12 +570,197 @@ async function startServer() {
             },
           },
         });
-        const data = response.text ? JSON.parse(response.text) : {};
+        const data = parseJsonResponseSafely(response.text, {});
         if (data.country) data.country = normalizeCountry(data.country);
         if (data.translations?.country) {
           data.translations.country = normalizeCountry(data.translations.country);
         }
         return res.json({ success: true, result: data });
+      }
+
+      if (action === 'parseTextCard') {
+        const cleanedText = String(rawText || '').trim().slice(0, 15000);
+        if (!cleanedText) {
+          return res.status(400).json({ success: false, error: '請貼上 Email 簽名檔或文字聯絡資訊' });
+        }
+
+        const response = await generateContentWithFallback(ai, {
+          contents: `你是 BizMind 智慧名片系統的聯絡人解析專家。請將以下貼上的 Email 簽名檔、LINE 自我介紹或文字聯絡資訊，解析為標準化結構名片 JSON。
+【輸入文字】：
+${cleanedText}
+
+【解析規則】：
+1. 僅提取文字中明確存在的資訊，無對應欄位請留空字串 ""。
+2. 若同時有中英文姓名或機構，主欄位優先保留英文（若僅有中文則填中文），中文對照填入 translations。
+3. 國家轉換為標準英文名稱（如 "Taiwan SAR"、"China Mainland"、"Hong Kong SAR"、"Japan"、"United States"）。
+4. 分類 (category)："employer"（企業夥伴）、"academic"（學研專家）、"staff"（機關社團）、"other"（一般聯絡人）。
+5. 若文字中有額外介紹、LINE ID 或備註重點，整理至 notes。
+6. 撰寫 50-90 字繁體中文 summary 與簡短 reasoning。`,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                prefix: { type: Type.STRING },
+                firstName: { type: Type.STRING },
+                lastName: { type: Type.STRING },
+                title: { type: Type.STRING },
+                company: { type: Type.STRING },
+                department: { type: Type.STRING },
+                industry: { type: Type.STRING },
+                country: { type: Type.STRING },
+                email: { type: Type.STRING },
+                subject: { type: Type.STRING },
+                phone: { type: Type.STRING },
+                fax: { type: Type.STRING },
+                website: { type: Type.STRING },
+                address: { type: Type.STRING },
+                notes: { type: Type.STRING },
+                category: { type: Type.STRING, enum: ['employer', 'academic', 'staff', 'other'] },
+                summary: { type: Type.STRING },
+                reasoning: { type: Type.STRING },
+                translations: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    company: { type: Type.STRING },
+                    department: { type: Type.STRING },
+                    industry: { type: Type.STRING },
+                    subject: { type: Type.STRING },
+                    country: { type: Type.STRING },
+                  },
+                },
+              },
+              required: ['firstName', 'lastName', 'title', 'company', 'category', 'summary', 'reasoning'],
+            },
+          },
+        });
+
+        const data = parseJsonResponseSafely(response.text, {});
+        if (data.country) data.country = normalizeCountry(data.country);
+        if (data.translations?.country) {
+          data.translations.country = normalizeCountry(data.translations.country);
+        }
+        return res.json({ success: true, result: data });
+      }
+
+      if (action === 'transcribeVoiceNote') {
+        const cleanAudio = String(audioBase64 || '').trim();
+        if (!cleanAudio) {
+          return res.status(400).json({ success: false, error: '缺少語音錄音資料' });
+        }
+        const contactName = `${card?.lastName || ''}${card?.firstName || ''}`.trim() || card?.company || '此聯絡人';
+        const response = await generateContentWithFallback(ai, {
+          contents: {
+            parts: [
+              { inlineData: { mimeType: mimeType || 'audio/webm', data: cleanAudio } },
+              {
+                text: `請聆聽這段會後語音備忘錄（對象：${contactName}，公司：${card?.company || '未知'}），並以繁體中文整理為精簡專業的 JSON 紀要：
+1. summaryBullet：以「• 」條列整理的會談重點、合作意向與待辦事項（1~4 點，簡明俐落）。
+2. suggestedTags：從語音內容提煉 1~3 個簡短分類標籤（如「合作提案」、「ESG」、「優先跟進」），不含 # 號。
+3. suggestedFollowUpDays：若語音中提到何時再聯繫（如明天=1、下週=7、兩週後=14、下個月=30），回傳整數天數；若未提到請回傳 0。`,
+              },
+            ],
+          },
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                summaryBullet: { type: Type.STRING },
+                suggestedTags: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                suggestedFollowUpDays: { type: Type.INTEGER },
+              },
+              required: ['summaryBullet', 'suggestedTags'],
+            },
+          },
+        });
+
+        const parsed = parseJsonResponseSafely(response.text, {
+          summaryBullet: '',
+          suggestedTags: [],
+          suggestedFollowUpDays: 0,
+        });
+        return res.json({
+          success: true,
+          result: {
+            summaryBullet: parsed.summaryBullet || '',
+            suggestedTags: Array.isArray(parsed.suggestedTags) ? parsed.suggestedTags.slice(0, 5) : [],
+            suggestedFollowUpDays:
+              typeof parsed.suggestedFollowUpDays === 'number' && parsed.suggestedFollowUpDays > 0
+                ? parsed.suggestedFollowUpDays
+                : null,
+          },
+        });
+      }
+
+      if (action === 'enrichCard') {
+        const companyName = String(card?.company || '').trim();
+        const website = String(card?.website || '').trim();
+        const emailDomain = String(card?.email || '').includes('@')
+          ? String(card.email).split('@')[1]?.split(/[\/,;\s]+/)[0] || ''
+          : '';
+
+        if (!companyName && !website && !emailDomain) {
+          return res.status(400).json({
+            success: false,
+            error: '名片需至少包含公司名稱、官網或 Email 網域才能進行背景查證',
+          });
+        }
+
+        const response = await generateContentWithFallback(ai, {
+          contents: `請使用 Google 搜尋查證以下名片聯絡人所屬機構的公開背景資訊，並回傳 JSON：
+- 聯絡人：${card?.lastName || ''}${card?.firstName || ''} (${card?.title || ''})
+- 機構/公司：${companyName} ${card?.translations?.company ? `(${card.translations.company})` : ''}
+- 現有官網：${website || '未填寫'}
+- Email 網域：${emailDomain || '未填寫'}
+- 所在國家：${card?.country || '未填寫'}
+
+【輸出 JSON 欄位】：
+- companySummary：約 60-110 字繁體中文，客觀精煉介紹該機構的主要業務、定位或特色。
+- industry：標準化的簡短產業類別（如「半導體製造」、「高等教育」、「永續科技」、「非營利組織」）。
+- website：若找到確切官方網站網址請填入（https://...），不確定則留空字串 ""。
+- country：標準英文國別名稱（如 "Taiwan SAR"、"United States"、"Japan"），不確定則留空字串 ""。`,
+          config: {
+            tools: [{ googleSearch: {} }],
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                companySummary: { type: Type.STRING },
+                industry: { type: Type.STRING },
+                website: { type: Type.STRING },
+                country: { type: Type.STRING },
+              },
+              required: ['companySummary'],
+            },
+          },
+        });
+
+        const candidate = response.candidates?.[0];
+        const groundingMetadata = candidate?.groundingMetadata;
+        const parsed = parseJsonResponseSafely(response.text, {});
+        const sources = (groundingMetadata?.groundingChunks || [])
+          .map((chunk: any) => ({
+            title: chunk.web?.title || '公開查證來源',
+            url: chunk.web?.uri || '',
+          }))
+          .filter((s: any) => s.url)
+          .slice(0, 5);
+
+        return res.json({
+          success: true,
+          result: {
+            companySummary: parsed.companySummary || '',
+            industry: parsed.industry || '',
+            website: parsed.website || '',
+            country: parsed.country ? normalizeCountry(parsed.country) : '',
+            sources,
+          },
+        });
       }
 
       if (action === 'detectCards') {
@@ -381,13 +826,9 @@ async function startServer() {
             resolvedMimeType = String(imageUrl).match(/data:(.*?);/)?.[1] || 'image/jpeg';
             resolvedBase64 = String(imageUrl).split(',')[1] || '';
           } else if (/^https?:\/\//i.test(String(imageUrl))) {
-            const imgResp = await fetch(String(imageUrl));
-            if (!imgResp.ok) {
-              throw new Error(`無法讀取反面影像網址 (${imgResp.status})`);
-            }
-            const arrBuf = await imgResp.arrayBuffer();
-            resolvedBase64 = Buffer.from(arrBuf).toString('base64');
-            resolvedMimeType = imgResp.headers.get('content-type') || 'image/jpeg';
+            const { buffer, contentType } = await safeFetchImageUrl(String(imageUrl));
+            resolvedBase64 = buffer.toString('base64');
+            resolvedMimeType = contentType;
           }
         }
 
@@ -633,10 +1074,10 @@ ${frontSummary}
     }
   });
 
-  // --- 4. API: AI Smart Contact Assistant ---
+  // --- 4. API: AI Smart Contact Assistant (Multi-turn + 50-card Context) ---
   app.post('/api/chat', async (req, res) => {
     try {
-      const { prompt, isSearchEnabled, cards } = req.body;
+      const { prompt, isSearchEnabled, cards, history } = req.body;
       if (!prompt) return res.status(400).json({ success: false, error: 'Missing prompt' });
 
       const ai = getAiClient();
@@ -646,23 +1087,58 @@ ${frontSummary}
       }
 
       let systemInstruction =
-        '你是 BizMind 智慧名片與人脈管理平台的專業 AI 助理，協助使用者檢索聯絡人、盤點合作夥伴並提供友善溝通建議。';
+        '你是 BizMind 智慧名片與人脈管理平台的專業 AI 助理，協助使用者檢索聯絡人、盤點合作夥伴、追蹤待跟進名單並提供友善溝通建議。';
 
       const hasCards = cards && Array.isArray(cards) && cards.length > 0;
       if (hasCards) {
-        const limitedCards = cards.slice(0, 35).map((c: any) => ({
+        const keywords = String(prompt)
+          .toLowerCase()
+          .split(/[\s,，、。？！?]+/)
+          .filter((k) => k.length >= 2);
+
+        const scoredCards = cards.map((c: any) => {
+          const hay = [
+            c.lastName,
+            c.firstName,
+            c.company,
+            c.title,
+            c.industry,
+            c.subject,
+            c.country,
+            c.source,
+            c.notes,
+            ...(c.tags || []),
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+          let score = 0;
+          for (const kw of keywords) {
+            if (hay.includes(kw)) score += 3;
+          }
+          if (c.nextFollowUpAt) score += 1;
+          return { card: c, score };
+        });
+
+        scoredCards.sort((a, b) => b.score - a.score || (b.card.scannedAt || 0) - (a.card.scannedAt || 0));
+
+        const limitedCards = scoredCards.slice(0, 50).map(({ card: c }) => ({
           ID: c.id,
           姓名: `${c.lastName || ''}${c.firstName || ''}`,
           公司機構: c.company || '',
           職稱: c.title || '',
           產業領域: c.industry || c.subject || '',
           國家: c.country || '',
+          來源: c.source || '',
+          標籤: Array.isArray(c.tags) ? c.tags : [],
+          跟進狀態: c.followUpStatus || 'new',
           Email: c.email || '',
           電話: c.phone || '',
+          備註: c.notes ? String(c.notes).slice(0, 120) : '',
           簡介: c.summary || '',
         }));
 
-        systemInstruction += `\n\n【目前名片庫資料】（共載入 ${limitedCards.length} 筆）：\n${JSON.stringify(limitedCards)}\n\n`;
+        systemInstruction += `\n\n【目前名片庫資料】（精選載入 ${limitedCards.length} / ${cards.length} 筆）：\n${JSON.stringify(limitedCards)}\n\n`;
         if (isSearchEnabled) {
           systemInstruction +=
             '請優先參考名片庫回答，並搭配網路搜尋補充該機構或領域的最新公開資訊。若有對應聯絡人請將其 ID 與姓名放入 linkedCards。';
@@ -672,13 +1148,36 @@ ${frontSummary}
         }
       }
 
+      // Build multi-turn context from recent 6 history messages
+      const validHistory = Array.isArray(history)
+        ? history
+            .filter(
+              (h: any) =>
+                (h?.role === 'user' || h?.role === 'model') &&
+                typeof h?.content === 'string' &&
+                h.content.trim().length > 0
+            )
+            .slice(-6)
+        : [];
+
+      const contentsPayload =
+        validHistory.length > 0
+          ? [
+              ...validHistory.map((h: any) => ({
+                role: h.role,
+                parts: [{ text: h.content.slice(0, 1500) }],
+              })),
+              { role: 'user', parts: [{ text: String(prompt) }] },
+            ]
+          : String(prompt);
+
       const response = await generateContentWithFallback(ai, {
-        contents: prompt,
+        contents: contentsPayload,
         config: {
           ...config,
           systemInstruction:
             systemInstruction +
-            "\n\n請以 JSON 格式回答，包含 'reply' (回答文字) 與 'linkedCards' (符合的名片陣列，每項含 'id' 與 'name')。",
+            "\n\n請以 JSON 格式回答，包含 'reply' (回答文字，支援 Markdown) 與 'linkedCards' (符合的名片陣列，每項含 'id' 與 'name')。",
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -703,9 +1202,9 @@ ${frontSummary}
 
       const candidate = response.candidates?.[0];
       const groundingMetadata = candidate?.groundingMetadata;
-      const parsed = JSON.parse(response.text || '{}');
+      const parsed = parseJsonResponseSafely(response.text, { reply: response.text || '', linkedCards: [] });
       const reply = parsed.reply || '';
-      const linkedCards = parsed.linkedCards || [];
+      const linkedCards = Array.isArray(parsed.linkedCards) ? parsed.linkedCards : [];
 
       let sources: { title: string; url: string }[] = [];
       if (groundingMetadata?.groundingChunks) {

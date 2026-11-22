@@ -19,6 +19,7 @@ import {
 import Markdown from 'react-markdown';
 import { BusinessCardData } from '../types';
 import { filterCards, FilterIntent } from '../utils/cardFilters';
+import { apiFetch } from '../utils/apiClient';
 import { useToast } from './ToastProvider';
 
 interface ChatMessage {
@@ -90,10 +91,14 @@ export default function ChatBox({
     setInput('');
     setThinkingStage('正在解析語意搜尋條件...');
 
+    const recentHistory = messages.slice(-6).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
     try {
-      const intentRes = await fetch('/api/chat/intent', {
+      const intentRes = await apiFetch('/api/chat/intent', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: cleanPrompt }),
       });
       const intentData = await intentRes.json();
@@ -110,13 +115,13 @@ export default function ChatBox({
         );
       }
 
-      const res = await fetch('/api/chat', {
+      const res = await apiFetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: cleanPrompt,
           isSearchEnabled: useWeb,
           cards: candidateCards,
+          history: recentHistory,
         }),
       });
       const data = await res.json();

@@ -31,8 +31,16 @@ import {
   Upload,
   CheckSquare,
   ChevronDown,
+  BellRing,
+  FileText,
+  BarChart3,
 } from 'lucide-react';
-import { BusinessCardData, SearchPageState, SearchSortOption } from '../types';
+import {
+  BusinessCardData,
+  SearchPageState,
+  SearchSortOption,
+  FOLLOW_UP_STATUS_LABELS,
+} from '../types';
 import { filterCards } from '../utils/cardFilters';
 import { normalizeCountry, getCountryBilingualLabel } from '../utils/countries';
 import { getBoundQsSubmissionList } from '../utils/qsValidation';
@@ -68,6 +76,8 @@ interface SearchPageProps {
   onBatchReorganizeDualSide?: () => void;
   onLoadDemoCards?: () => void;
   onTriggerUpload?: () => void;
+  onOpenTextImport?: () => void;
+  onOpenInsights?: () => void;
   dualSideReorgProgress?: { current: number; total: number } | null;
   isExporting?: boolean;
   isAutoUprighting?: boolean;
@@ -139,6 +149,8 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
     onBatchReorganizeDualSide,
     onLoadDemoCards,
     onTriggerUpload,
+    onOpenTextImport,
+    onOpenInsights,
     dualSideReorgProgress = null,
     isExporting = false,
     isAutoUprighting = false,
@@ -225,6 +237,14 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
     );
 
     const boundQs = useMemo(() => getBoundQsSubmissionList(cards), [cards]);
+
+    const dueFollowUpCards = useMemo(() => {
+      const horizon = Date.now() + 7 * 86400000;
+      return cards
+        .filter((c) => c.nextFollowUpAt && c.nextFollowUpAt <= horizon)
+        .sort((a, b) => (a.nextFollowUpAt || 0) - (b.nextFollowUpAt || 0))
+        .slice(0, 6);
+    }, [cards]);
 
     const { countryStats, tagStats, sourceStats } = useMemo(() => {
       const cMap = new Map<string, number>();
@@ -664,6 +684,19 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
                 </div>
               )}
 
+              {/* Insights Dashboard Trigger */}
+              {cards.length > 0 && onOpenInsights && (
+                <button
+                  type="button"
+                  onClick={onOpenInsights}
+                  className="h-8 px-2.5 rounded-xl text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  title="檢視人脈洞察與永續減碳儀表板"
+                >
+                  <BarChart3 className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                  <span className="hidden lg:inline">洞察分析</span>
+                </button>
+              )}
+
               {/* View Mode Segmented Switch (Desktop/Tablet) */}
               <div className="hidden sm:flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700">
                 <button
@@ -1006,6 +1039,16 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
                       <span>選擇名片或 PDF</span>
                     </button>
                   )}
+                  {onOpenTextImport && (
+                    <button
+                      type="button"
+                      onClick={onOpenTextImport}
+                      className="px-4 py-2.5 bg-white dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 text-slate-800 dark:text-slate-200 hover:text-indigo-700 dark:hover:text-indigo-300 border border-slate-200 dark:border-slate-700 rounded-xl text-sm font-semibold transition-colors flex items-center gap-2 cursor-pointer"
+                    >
+                      <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                      <span>貼上簽名檔建檔</span>
+                    </button>
+                  )}
                   {onLoadDemoCards && (
                     <button
                       type="button"
@@ -1038,6 +1081,43 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
             </div>
           ) : (
             <div className="space-y-6 pb-24">
+              {/* Upcoming / Overdue CRM Follow-Up Strip */}
+              {dueFollowUpCards.length > 0 && !hasActiveFilters && (
+                <div className="rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-800/70 px-4 py-3 flex items-center gap-3 flex-wrap">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900 dark:text-amber-200 shrink-0">
+                    <BellRing className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                    <span>7 日內待跟進 ({dueFollowUpCards.length})：</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap flex-1">
+                    {dueFollowUpCards.map((c) => {
+                      const isOverdue = (c.nextFollowUpAt || 0) < Date.now() - 86400000;
+                      const nm =
+                        `${c.lastName || ''}${c.firstName || ''}`.trim() || c.company || '聯絡人';
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => onSelectCard(c.id)}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                            isOverdue
+                              ? 'bg-rose-50 dark:bg-rose-950/60 border-rose-300 dark:border-rose-800 text-rose-800 dark:text-rose-200'
+                              : 'bg-white dark:bg-slate-900 border-amber-300/80 dark:border-amber-700 text-slate-800 dark:text-slate-100 hover:border-indigo-400'
+                          }`}
+                        >
+                          <span>{nm}</span>
+                          <span className="text-[10px] opacity-75 tabular-nums">
+                            {new Date(c.nextFollowUpAt!).toLocaleDateString('zh-TW', {
+                              month: 'numeric',
+                              day: 'numeric',
+                            })}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {Object.entries(groupedCards).map(
                 ([groupTitle, groupItems]: [string, BusinessCardData[]]) => (
                   <div key={groupTitle}>
@@ -1379,7 +1459,7 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
                                         )}
                                       </div>
 
-                                      <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                                        <div className="mt-2 flex items-center gap-1.5 flex-wrap" onClick={(e) => e.stopPropagation()}>
                                         <select
                                           value={card.category || 'employer'}
                                           onChange={(e) =>
@@ -1400,6 +1480,15 @@ const SearchPage: React.FC<SearchPageProps> = React.memo(
                                           <option value="staff">機關社團</option>
                                           <option value="other">一般聯絡人</option>
                                         </select>
+                                        {card.followUpStatus && card.followUpStatus !== 'new' && (
+                                          <span
+                                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${
+                                              FOLLOW_UP_STATUS_LABELS[card.followUpStatus].colorCls
+                                            }`}
+                                          >
+                                            {FOLLOW_UP_STATUS_LABELS[card.followUpStatus].label}
+                                          </span>
+                                        )}
                                       </div>
                                     </td>
 

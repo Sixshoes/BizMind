@@ -11,6 +11,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { useToast } from './ToastProvider';
+import { ConfidenceLevel } from '../types';
 
 export type FieldActionType = 'email' | 'phone' | 'website' | 'address';
 
@@ -31,6 +32,7 @@ interface EditableFieldProps {
   onEmailAction?: () => void;
   isMissing?: boolean;
   missingHint?: string;
+  confidence?: ConfidenceLevel;
 }
 
 const EditableField = React.memo(
@@ -51,6 +53,7 @@ const EditableField = React.memo(
     onEmailAction,
     isMissing = false,
     missingHint,
+    confidence,
   }: EditableFieldProps) => {
     const { addToast } = useToast();
     const [copied, setCopied] = useState(false);
@@ -123,8 +126,12 @@ const EditableField = React.memo(
     const hasQuickActions = Boolean(actionType && value?.trim());
     const hasCombobox = normalizedOptions.length > 0 && !isTextArea;
 
+    const isLowConfidence = confidence === 'low' && Boolean((value || '').trim());
+
     const inputBorderCls = isMissing
       ? 'border-amber-400 dark:border-amber-500/80 bg-amber-50/40 dark:bg-amber-950/20 focus:border-indigo-600 dark:focus:border-indigo-400'
+      : isLowConfidence
+      ? 'border-amber-400 border-dashed dark:border-amber-500/80 bg-amber-50/25 dark:bg-amber-950/15 focus:border-indigo-600 dark:focus:border-indigo-400'
       : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-slate-400 dark:hover:border-slate-600 focus:border-indigo-600 dark:focus:border-indigo-400';
 
     return (
@@ -142,6 +149,14 @@ const EditableField = React.memo(
                 title={missingHint || '建議補齊此欄位以利報表匯出'}
               >
                 <AlertCircle className="w-3.5 h-3.5" />
+              </span>
+            )}
+            {isLowConfidence && !isMissing && (
+              <span
+                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 border border-amber-300/80 dark:border-amber-700 text-[10px] font-bold text-amber-800 dark:text-amber-300"
+                title="AI 判斷原圖此區文字較模糊或反光，建議核對原圖確認"
+              >
+                AI 建議複查
               </span>
             )}
           </label>

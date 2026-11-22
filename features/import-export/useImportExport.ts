@@ -2,8 +2,6 @@ import React, { useState, useCallback } from 'react';
 import { BusinessCardData, ExportMode } from '../../types';
 import { getCardById, saveAllCardsToDB, getCardsMetadataFromDB } from '../../services/dbService';
 import { createVCardFile } from '../../services/vcardService';
-import { createBatchExportZip } from '../../services/zipService';
-import { createExcelFile, parseExcelImport } from '../../services/excelService';
 import { useToast } from '../../components/ToastProvider';
 import { normalizeCountry } from '../../utils/countries';
 import { DEFAULT_CARD_SOURCE, getBoundQsSubmissionList } from '../../utils/qsValidation';
@@ -110,12 +108,14 @@ export const useImportExport = (
       }
 
       if (mode === 'zip') {
+        const { createBatchExportZip } = await import('../../services/zipService');
         const zipFile = await createBatchExportZip(fullCards);
         triggerBlobDownload(zipFile, zipFile.name);
         addToast({ type: 'success', message: 'ZIP 壓縮包匯出成功' });
         return;
       }
 
+      const { createExcelFile } = await import('../../services/excelService');
       const excelFile = await createExcelFile(fullCards, mode);
       triggerBlobDownload(excelFile, excelFile.name);
       if (mode === 'qs_ready_all' && boundInfo) {
@@ -204,6 +204,7 @@ export const useImportExport = (
   const handleCsvImport = useCallback(
     async (file: File) => {
       try {
+        const { parseExcelImport } = await import('../../services/excelService');
         const data = await parseExcelImport(file);
         const importedItems: BusinessCardData[] = [];
 

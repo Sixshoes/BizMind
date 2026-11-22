@@ -7,6 +7,7 @@ import {
   saveAllCardsToDB,
 } from '../services/dbService';
 import { normalizeCountry } from '../utils/countries';
+import { apiFetch } from '../utils/apiClient';
 import {
   DEFAULT_CARD_SOURCE,
   inferCountryFromCard,
@@ -86,9 +87,8 @@ export const useCardState = () => {
                 rotation: c.rotation || 0,
                 backRotation: c.backRotation || 0,
               }));
-              const res = await fetch('/api/cards/auto-upright', {
+              const res = await apiFetch('/api/cards/auto-upright', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ cards: slice }),
               });
               const json = await res.json();
@@ -153,6 +153,7 @@ export const useCardState = () => {
       setSaveStatus('saving');
       const normalizedCard: BusinessCardData = {
         ...cardToSave,
+        updatedAt: Date.now(),
         country: cardToSave.country ? normalizeCountry(cardToSave.country) : '',
         translations: cardToSave.translations
           ? {

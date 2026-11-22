@@ -8,6 +8,7 @@ import { useToast } from './ToastProvider';
 interface FollowUpEmailDrawerProps {
   card: BusinessCardData | null;
   onClose: () => void;
+  onEmailActed?: (card: BusinessCardData) => void;
 }
 
 const SENDER_STORAGE_KEY = 'bizmind_sender_profile_v1';
@@ -19,7 +20,11 @@ const REFINEMENT_CHIPS = [
   { label: '轉為英文版', instruction: 'Please write this follow-up email in natural, polite English.', switchLang: 'en' as const },
 ];
 
-export const FollowUpEmailDrawer: React.FC<FollowUpEmailDrawerProps> = ({ card, onClose }) => {
+export const FollowUpEmailDrawer: React.FC<FollowUpEmailDrawerProps> = ({
+  card,
+  onClose,
+  onEmailActed,
+}) => {
   const { addToast } = useToast();
   const [tone, setTone] = useState<'business' | 'academic' | 'event_followup'>('business');
   const [language, setLanguage] = useState<'zh-TW' | 'en'>('zh-TW');
@@ -121,6 +126,9 @@ export const FollowUpEmailDrawer: React.FC<FollowUpEmailDrawerProps> = ({ card, 
     try {
       await navigator.clipboard.writeText(text);
       setCopiedField(target);
+      if (target === 'all' && card) {
+        onEmailActed?.(card);
+      }
       addToast({ type: 'success', message: '已複製至剪貼簿' });
       setTimeout(() => setCopiedField(null), 2000);
     } catch {
@@ -410,6 +418,7 @@ export const FollowUpEmailDrawer: React.FC<FollowUpEmailDrawerProps> = ({ card, 
                   href={gmailHref}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => card && onEmailActed?.(card)}
                   className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap ${
                     subject || body
                       ? 'bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 hover:text-indigo-700'
@@ -422,6 +431,7 @@ export const FollowUpEmailDrawer: React.FC<FollowUpEmailDrawerProps> = ({ card, 
                   href={outlookHref}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => card && onEmailActed?.(card)}
                   className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap hidden sm:inline-flex ${
                     subject || body
                       ? 'bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 hover:text-indigo-700'
@@ -432,6 +442,7 @@ export const FollowUpEmailDrawer: React.FC<FollowUpEmailDrawerProps> = ({ card, 
                 </a>
                 <a
                   href={mailtoHref}
+                  onClick={() => card && onEmailActed?.(card)}
                   className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap ${
                     subject || body
                       ? 'bg-slate-900 dark:bg-indigo-600 hover:bg-slate-800 dark:hover:bg-indigo-500 text-white'

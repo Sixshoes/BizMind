@@ -36,7 +36,16 @@ function normalizeTokenKey(val: string): string {
 
 function splitSlashParts(val?: string | null): string[] {
   if (!val) return [];
-  return String(val)
+  const str = String(val).trim();
+  if (!str) return [];
+  // Preserve URL slashes (https://domain.com/path); only split URLs on spaced ' / ', newlines, or semicolons
+  if (/https?:\/\//i.test(str)) {
+    return str
+      .split(/\s+\/\s+|\n+|;+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return str
     .split(/\s*\/\s*|\n+/)
     .map((s) => s.trim())
     .filter(Boolean);

@@ -23,12 +23,26 @@ isSupported()
   .catch(() => {});
 
 /**
+ * Canonical Storage path builder shared across firebase.ts and cardCloud.ts
+ * so front/back images never drift or leave orphan assets on deletion.
+ */
+export const buildCardImagePath = (
+  uid: string,
+  cardId: string,
+  side: 'front' | 'back'
+): string => {
+  const safeId = cardId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `users/${uid}/cards/${safeId}_${side}.jpg`;
+};
+
+/**
  * Uploads base64 image to user's private Firebase Storage path when signed in,
  * or falls back cleanly to local data URI in Guest mode.
  */
 export const uploadImageAsset = async (
   base64OrUrl: string,
-  cardAssetKey: string
+  cardAssetKey: string,
+  side?: 'front' | 'back'
 ): Promise<{ imageId: string; downloadUrl: string; storagePath?: string }> => {
   const auth = getAuth(app);
   const uid = auth.currentUser?.uid;
@@ -40,8 +54,11 @@ export const uploadImageAsset = async (
     };
   }
 
-  const safeKey = cardAssetKey.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const storagePath = `users/${uid}/cards/${safeKey}.jpg`;
+  const inferredSide: 'front' | 'back' =
+    side || (cardAssetKey.endsWith('_back') ? 'back' : 'front');
+  const baseCardId = cardAssetKey.replace(/_(front|back)$/, '');
+  const storagePath = buildCardImagePath(uid, baseCardId, inferredSide);
+  const safeKey = `${baseCardId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${inferredSide}`;
   const fileRef = ref(storage, storagePath);
   await uploadString(fileRef, base64OrUrl, 'data_url');
   const downloadUrl = await getDownloadURL(fileRef);
@@ -57,7 +74,7 @@ export const uploadImageToFirebase = async (base64Data: string, cardId: string):
   const dataUri = base64Data.startsWith('data:image')
     ? base64Data
     : `data:image/jpeg;base64,${base64Data}`;
-  const uploaded = await uploadImageAsset(dataUri, cardId);
+  const uploaded = await uploadImageAsset(dataUri, cardId, 'front');
   return uploaded.downloadUrl;
 };
 

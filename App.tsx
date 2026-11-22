@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, Suspense, lazy } from 'react';
 import { motion } from 'motion/react';
-import * as pdfjsLib from 'pdfjs-dist';
 import type { User } from 'firebase/auth';
 import {
   ScanLine,
@@ -46,6 +45,10 @@ import {
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
+  FileText,
+  BarChart3,
+  WifiOff,
+  Contact,
 } from 'lucide-react';
 
 import {
@@ -58,7 +61,9 @@ import {
 import { filterCards, FilterIntent } from './utils/cardFilters';
 import { ThemePreference, getSavedTheme, applyTheme } from './utils/theme';
 import { normalizeCountry, getCountryBilingualLabel } from './utils/countries';
+import { apiFetch } from './utils/apiClient';
 import {
+  DEFAULT_CARD_SOURCE,
   inferCountryFromCard,
   auditCardQsCategory,
   getBoundQsSubmissionList,
@@ -68,11 +73,13 @@ import { detectBusinessCards, extractBackCardInfo } from './services/geminiServi
 import {
   getCardById,
   saveCardToDB,
-  saveCardLocalOnly,
   saveAllCardsToDB,
   deleteCardFromDB,
   deleteCardsFromDB,
   clearAllCardsFromDB,
+  reconcileCloudSnapshotWithLocal,
+  getGuestLocalCards,
+  migrateGuestCardsToCloud,
 } from './services/dbService';
 import { uploadImageAsset } from './utils/firebase';
 import {
@@ -83,30 +90,19 @@ import {
   signOut,
   authErrorMessage,
 } from './utils/auth';
-import { fetchCloudCards } from './utils/cardCloud';
+import { fetchCloudCards, subscribeCloudCards } from './utils/cardCloud';
 import { createDemoCards } from './utils/demoCards';
 import { createVCardFile } from './services/vcardService';
 
 import LoginScreen from './components/LoginScreen';
-import CameraScanner from './components/CameraScanner';
 import SearchPage from './components/SearchPage';
-import ChatBox from './components/ChatBox';
 import { useToast } from './components/ToastProvider';
 import { useConfirm } from './components/ConfirmDialogProvider';
-import { TourOverlay, TourStep } from './components/TourOverlay';
-import { QsConfirmationModal } from './components/QsConfirmationModal';
-import { DuplicateManagerModal } from './components/DuplicateManagerModal';
+import type { TourStep } from './components/TourOverlay';
+import type { CropRegion } from './components/CropperWorkspace';
 import { SidebarCardItem } from './components/SidebarCardItem';
-import { CropperWorkspace, CropRegion } from './components/CropperWorkspace';
 import { CardDetailPanel } from './components/CardDetailPanel';
 import { BatchEditBar } from './components/BatchEditBar';
-import { QrCodeModal } from './components/QrCodeModal';
-import { FollowUpEmailDrawer } from './components/FollowUpEmailDrawer';
-import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
-import { UserGuideModal } from './components/UserGuideModal';
-import { DualSideConflictModal } from './components/DualSideConflictModal';
-import { ThreeGoodImpactModal } from './components/ThreeGoodImpactModal';
-import { CommandPalette } from './components/CommandPalette';
 import { ScanQueueDock } from './components/ScanQueueDock';
 import { compressImage } from './utils/imageUtils';
 import {
@@ -121,13 +117,68 @@ import { useScanPipeline } from './features/scan-pipeline/useScanPipeline';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { analyzeDuplicates, mergeDuplicateCards } from './utils/duplicateUtils';
 
-const pdfjs = (pdfjsLib as any).default || pdfjsLib;
-if (pdfjs.GlobalWorkerOptions) {
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.js',
-    import.meta.url
-  ).toString();
-}
+// Lazy-loaded heavy secondary workspaces & modals for snappy initial bundle performance
+const CameraScanner = lazy(() => import('./components/CameraScanner'));
+const ChatBox = lazy(() => import('./components/ChatBox'));
+const CropperWorkspace = lazy(() =>
+  import('./components/CropperWorkspace').then((m) => ({ default: m.CropperWorkspace }))
+);
+const TourOverlay = lazy(() =>
+  import('./components/TourOverlay').then((m) => ({ default: m.TourOverlay }))
+);
+const QsConfirmationModal = lazy(() =>
+  import('./components/QsConfirmationModal').then((m) => ({ default: m.QsConfirmationModal }))
+);
+const DuplicateManagerModal = lazy(() =>
+  import('./components/DuplicateManagerModal').then((m) => ({ default: m.DuplicateManagerModal }))
+);
+const QrCodeModal = lazy(() =>
+  import('./components/QrCodeModal').then((m) => ({ default: m.QrCodeModal }))
+);
+const FollowUpEmailDrawer = lazy(() =>
+  import('./components/FollowUpEmailDrawer').then((m) => ({ default: m.FollowUpEmailDrawer }))
+);
+const KeyboardShortcutsModal = lazy(() =>
+  import('./components/KeyboardShortcutsModal').then((m) => ({ default: m.KeyboardShortcutsModal }))
+);
+const UserGuideModal = lazy(() =>
+  import('./components/UserGuideModal').then((m) => ({ default: m.UserGuideModal }))
+);
+const DualSideConflictModal = lazy(() =>
+  import('./components/DualSideConflictModal').then((m) => ({ default: m.DualSideConflictModal }))
+);
+const ThreeGoodImpactModal = lazy(() =>
+  import('./components/ThreeGoodImpactModal').then((m) => ({ default: m.ThreeGoodImpactModal }))
+);
+const CommandPalette = lazy(() =>
+  import('./components/CommandPalette').then((m) => ({ default: m.CommandPalette }))
+);
+const TextImportModal = lazy(() =>
+  import('./components/TextImportModal').then((m) => ({ default: m.TextImportModal }))
+);
+const MyDigitalCardModal = lazy(() =>
+  import('./components/MyDigitalCardModal').then((m) => ({ default: m.MyDigitalCardModal }))
+);
+const InsightsDashboardModal = lazy(() =>
+  import('./components/InsightsDashboardModal').then((m) => ({ default: m.InsightsDashboardModal }))
+);
+
+let pdfjsLoaderPromise: Promise<any> | null = null;
+const loadPdfJs = async () => {
+  if (!pdfjsLoaderPromise) {
+    pdfjsLoaderPromise = import('pdfjs-dist').then((mod) => {
+      const pdfjs = (mod as any).default || mod;
+      if (pdfjs.GlobalWorkerOptions) {
+        pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+          'pdfjs-dist/build/pdf.worker.min.js',
+          import.meta.url
+        ).toString();
+      }
+      return pdfjs;
+    });
+  }
+  return pdfjsLoaderPromise;
+};
 
 type ViewMode = 'camera' | 'file' | 'detail' | 'cropper' | 'search';
 
@@ -197,6 +248,12 @@ const App: React.FC = () => {
   const [showShortcutsModal, setShowShortcutsModal] = useState(false);
   const [showUserGuideModal, setShowUserGuideModal] = useState(false);
   const [showImpactModal, setShowImpactModal] = useState(false);
+  const [showTextImportModal, setShowTextImportModal] = useState(false);
+  const [showMyCardModal, setShowMyCardModal] = useState(false);
+  const [showInsightsModal, setShowInsightsModal] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
   const [fontScale, setFontScale] = useState<'standard' | 'comfortable' | 'large'>(() => {
     const saved = localStorage.getItem('bizmind_font_scale');
     if (saved === 'standard' || saved === 'comfortable' || saved === 'large') return saved;
@@ -264,28 +321,75 @@ const App: React.FC = () => {
     setDuplicateFilePrompt
   );
 
-  // --- Auth & Cloud Sync Lifecycle ---
+  // --- Auth & Real-Time Cloud Sync 2.0 Lifecycle ---
+  const cloudUnsubRef = useRef<(() => void) | null>(null);
+  const migrationCheckedUidRef = useRef<string | null>(null);
+
   useEffect(() => {
     const unsubscribe = watchAuth(async (user) => {
+      if (cloudUnsubRef.current) {
+        cloudUnsubRef.current();
+        cloudUnsubRef.current = null;
+      }
+
       setAuthUser(user);
       if (user) {
         setIsGuestMode(false);
         setIsCloudSyncing(true);
-        try {
-          const cloudCards = await fetchCloudCards();
-          for (const remote of cloudCards) {
-            await saveCardLocalOnly({
-              ...remote,
-              ownerUid: user.uid,
-              syncStatus: 'firebase',
-            });
+
+        // Offer one-click Guest -> Google Cloud migration when local guest cards exist
+        if (migrationCheckedUidRef.current !== user.uid) {
+          migrationCheckedUidRef.current = user.uid;
+          try {
+            const guestCards = await getGuestLocalCards();
+            if (guestCards.length > 0) {
+              const shouldMigrate = await confirm({
+                title: '匯入本機體驗模式名片至雲端？',
+                message: `偵測到您在本機體驗模式中保留了 ${guestCards.length} 筆名片，是否一鍵遷移並同步至您的 Google 個人雲端名片庫？`,
+                confirmLabel: `遷移 ${guestCards.length} 筆至雲端`,
+                cancelLabel: '暫不匯入',
+                variant: 'primary',
+              });
+              if (shouldMigrate) {
+                const moved = await migrateGuestCardsToCloud(user.uid);
+                addToast({
+                  type: 'success',
+                  message: `已成功將 ${moved} 筆體驗模式名片遷移至個人雲端！`,
+                });
+              }
+            }
+          } catch (migErr) {
+            console.warn('Guest migration check warning:', migErr);
           }
-        } catch (err) {
-          console.error('Failed to pull cloud cards:', err);
-        } finally {
-          await loadCards();
-          setIsCloudSyncing(false);
         }
+
+        // First load cached local cards immediately for instant UI, then attach real-time onSnapshot
+        await loadCards();
+        cloudUnsubRef.current = subscribeCloudCards(
+          user.uid,
+          async (remoteCards) => {
+            try {
+              const reconciled = await reconcileCloudSnapshotWithLocal(user.uid, remoteCards);
+              setCards(reconciled);
+              setFormData((prev) => {
+                if (!prev) return prev;
+                const latest = reconciled.find((c) => c.id === prev.id);
+                if (!latest) return prev;
+                if ((latest.updatedAt || 0) > (prev.updatedAt || 0)) {
+                  return latest;
+                }
+                return prev;
+              });
+            } catch (err) {
+              console.error('Failed to reconcile cloud snapshot:', err);
+            } finally {
+              setIsCloudSyncing(false);
+            }
+          },
+          () => {
+            setIsCloudSyncing(false);
+          }
+        );
       } else if (isGuestSessionActive()) {
         setIsGuestMode(true);
         await loadCards();
@@ -296,8 +400,54 @@ const App: React.FC = () => {
         setFormData(null);
       }
     });
-    return () => unsubscribe();
-  }, [loadCards, setCards, setSelectedCardId, setFormData]);
+    return () => {
+      if (cloudUnsubRef.current) {
+        cloudUnsubRef.current();
+        cloudUnsubRef.current = null;
+      }
+      unsubscribe();
+    };
+  }, [loadCards, setCards, setSelectedCardId, setFormData, confirm, addToast]);
+
+  // --- Offline / Online Network Resilience & Auto-Flush ---
+  useEffect(() => {
+    const onOnline = async () => {
+      setIsOnline(true);
+      if (authUser) {
+        const unsynced = cardsRef.current.filter((c) => c.syncStatus !== 'firebase');
+        if (unsynced.length > 0) {
+          setIsCloudSyncing(true);
+          try {
+            await saveAllCardsToDB(unsynced);
+            addToast({
+              type: 'success',
+              message: `網路已恢復，已自動補傳 ${unsynced.length} 筆離線修改至雲端`,
+            });
+          } catch {
+            // keep local until next retry
+          } finally {
+            setIsCloudSyncing(false);
+          }
+        } else {
+          addToast({ type: 'info', message: '網路連線已恢復', duration: 2200 });
+        }
+      }
+    };
+    const onOffline = () => {
+      setIsOnline(false);
+      addToast({
+        type: 'warning',
+        message: '目前處於離線模式：您仍可瀏覽與編輯本機名片，恢復連線後將自動同步。',
+        duration: 4000,
+      });
+    };
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, [authUser, cardsRef, addToast]);
 
   const handleLoadDemoCards = useCallback(async () => {
     try {
@@ -345,14 +495,8 @@ const App: React.FC = () => {
         await saveAllCardsToDB(unsynced);
       }
       const remoteCards = await fetchCloudCards();
-      for (const remote of remoteCards) {
-        await saveCardLocalOnly({
-          ...remote,
-          ownerUid: authUser.uid,
-          syncStatus: 'firebase',
-        });
-      }
-      await loadCards();
+      const reconciled = await reconcileCloudSnapshotWithLocal(authUser.uid, remoteCards);
+      setCards(reconciled);
       addToast({ type: 'success', message: '已完成個人雲端雙向同步' });
     } catch (err: any) {
       addToast({ type: 'error', message: `雲端同步失敗：${err.message || '未知錯誤'}` });
@@ -561,6 +705,9 @@ const App: React.FC = () => {
         showDuplicateManager ||
         showUserGuideModal ||
         showImpactModal ||
+        showTextImportModal ||
+        showMyCardModal ||
+        showInsightsModal ||
         dualSideConflictQueue.length > 0 ||
         tourStepIndex >= 0 ||
         Boolean(qrModalCard) ||
@@ -642,6 +789,9 @@ const App: React.FC = () => {
     showDuplicateManager,
     showUserGuideModal,
     showImpactModal,
+    showTextImportModal,
+    showMyCardModal,
+    showInsightsModal,
     dualSideConflictQueue.length,
     tourStepIndex,
     qrModalCard,
@@ -979,9 +1129,8 @@ const App: React.FC = () => {
           rotation: c.rotation || 0,
           backRotation: c.backRotation || 0,
         }));
-        const res = await fetch('/api/cards/auto-upright', {
+        const res = await apiFetch('/api/cards/auto-upright', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cards: slice }),
         });
         const json = await res.json();
@@ -1707,6 +1856,7 @@ const App: React.FC = () => {
       reader.onload = async (ev) => {
         const typedarray = new Uint8Array(ev.target?.result as ArrayBuffer);
         try {
+          const pdfjs = await loadPdfJs();
           const pdf = await pdfjs.getDocument(typedarray).promise;
           setPdfDoc(pdf);
           setCurrentPdfPage(1);
@@ -1831,16 +1981,19 @@ const App: React.FC = () => {
           const dataUri = `data:image/jpeg;base64,${b64}`;
           let backImageUrl = dataUri;
           let backImageId: string | undefined = undefined;
+          let backImagePath: string | undefined = undefined;
           try {
-            const uploaded = await uploadImageAsset(dataUri, `${formData.id}_back`);
+            const uploaded = await uploadImageAsset(dataUri, `${formData.id}_back`, 'back');
             backImageUrl = uploaded.downloadUrl;
             backImageId = uploaded.imageId;
+            backImagePath = uploaded.storagePath;
           } catch {
             // keep local base64 fallback
           }
           const withBack: BusinessCardData = {
             ...formData,
             backImageUrl,
+            backImagePath,
             backImageId,
             backRotation: 0,
           };
@@ -1880,6 +2033,139 @@ const App: React.FC = () => {
       }
     },
     [cameraTarget, formData, persistCardNow, handleProcessBackSideExtraction, addToast, setTasks]
+  );
+
+  // --- Global Clipboard Image Paste (⌘V / Ctrl+V) ---
+  useEffect(() => {
+    if (!authUser && !isGuestMode) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isTyping =
+        activeEl &&
+        (activeEl.tagName === 'INPUT' ||
+          activeEl.tagName === 'TEXTAREA' ||
+          activeEl.tagName === 'SELECT' ||
+          activeEl.isContentEditable);
+      if (isTyping || showTextImportModal) return;
+
+      const items = e.clipboardData?.items;
+      if (!items || items.length === 0) return;
+
+      const pastedImages: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const f = item.getAsFile();
+          if (f) pastedImages.push(f);
+        }
+      }
+      if (pastedImages.length > 0) {
+        e.preventDefault();
+        addToast({
+          type: 'info',
+          message: `偵測到剪貼簿名片影像（${pastedImages.length} 張），立即進入辨識流程！`,
+        });
+        if (pastedImages.length === 1) {
+          const dt = new DataTransfer();
+          dt.items.add(pastedImages[0]);
+          processFiles(dt.files);
+        } else {
+          processBatchFiles(pastedImages);
+          setViewMode('detail');
+        }
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [authUser, isGuestMode, showTextImportModal, addToast, processBatchFiles]);
+
+  // --- Save Card from Text Import / QR vCard ---
+  const handleSaveManualOrQrCard = useCallback(
+    async (newCard: BusinessCardData) => {
+      const saved = await saveCardToDB(newCard);
+      setCards((prev) =>
+        [saved, ...prev.filter((c) => c.id !== saved.id)].sort((a, b) => b.scannedAt - a.scannedAt)
+      );
+      await selectCard(saved.id);
+      setViewMode('detail');
+      addToast({
+        type: 'success',
+        message: `已建立聯絡人「${`${saved.lastName}${saved.firstName}`.trim() || saved.company || '新名片'}」`,
+      });
+    },
+    [setCards, selectCard, addToast]
+  );
+
+  const handleScanQrVCard = useCallback(
+    async (parsed: Partial<BusinessCardData>) => {
+      const now = Date.now();
+      const newCard: BusinessCardData = {
+        id: crypto.randomUUID(),
+        prefix: parsed.prefix || '',
+        firstName: parsed.firstName || '',
+        lastName: parsed.lastName || '',
+        title: parsed.title || '',
+        company: parsed.company || '',
+        department: parsed.department || '',
+        industry: parsed.industry || '',
+        country: parsed.country || '',
+        email: parsed.email || '',
+        phone: parsed.phone || '',
+        fax: parsed.fax || '',
+        subject: parsed.subject || '',
+        source: DEFAULT_CARD_SOURCE,
+        website: parsed.website || '',
+        address: parsed.address || '',
+        notes: parsed.notes || '',
+        category: 'employer',
+        reasoning: '透過相機即時掃描 vCard / MeCard QR Code 建立',
+        summary: '',
+        scannedAt: now,
+        updatedAt: now,
+        syncStatus: 'local',
+        followUpStatus: 'new',
+        activityLog: [
+          {
+            id: crypto.randomUUID(),
+            at: now,
+            type: 'created',
+            text: '透過 QR 電子名片免 AI 秒速匯入',
+          },
+        ],
+      };
+      const inferred = inferCountryFromCard(newCard);
+      if (inferred && !newCard.country) newCard.country = inferred;
+      setCameraTarget('new_card');
+      await handleSaveManualOrQrCard(newCard);
+    },
+    [handleSaveManualOrQrCard]
+  );
+
+  // --- Auto-update CRM status when Follow-up Email is copied/opened ---
+  const handleEmailActed = useCallback(
+    async (actedCard: BusinessCardData) => {
+      const nextStatus =
+        !actedCard.followUpStatus || actedCard.followUpStatus === 'new'
+          ? 'emailed'
+          : actedCard.followUpStatus;
+      const logEntry = {
+        id: crypto.randomUUID(),
+        at: Date.now(),
+        type: 'emailed' as const,
+        text: '已產生並開啟/複製會後問候跟進信',
+      };
+      const updated: BusinessCardData = {
+        ...actedCard,
+        followUpStatus: nextStatus,
+        activityLog: [logEntry, ...(actedCard.activityLog || [])].slice(0, 25),
+      };
+      const saved = await saveCardToDB(updated);
+      updateCardInList(saved);
+      if (formData && formData.id === saved.id) {
+        setFormData(saved);
+      }
+    },
+    [updateCardInList, formData, setFormData]
   );
 
   // --- Sync AI Chat Detected Intent to SearchPage Filters ---
@@ -2122,18 +2408,27 @@ const App: React.FC = () => {
               BizMind
             </span>
             <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5 hidden sm:inline-flex items-center gap-1.5 whitespace-nowrap">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  isCloudSyncing
-                    ? 'bg-indigo-500 animate-pulse'
-                    : authUser
-                    ? 'bg-emerald-500'
-                    : 'bg-slate-400'
-                }`}
-              />
-              <span>
-                {isCloudSyncing ? '雲端同步中' : authUser ? '雲端同步工作區' : '本機體驗模式'}
-              </span>
+              {!isOnline ? (
+                <>
+                  <WifiOff className="w-3 h-3 text-amber-500" />
+                  <span className="text-amber-600 dark:text-amber-400 font-semibold">離線模式</span>
+                </>
+              ) : (
+                <>
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      isCloudSyncing
+                        ? 'bg-indigo-500 animate-pulse'
+                        : authUser
+                        ? 'bg-emerald-500'
+                        : 'bg-slate-400'
+                    }`}
+                  />
+                  <span>
+                    {isCloudSyncing ? '雲端同步中' : authUser ? '即時雲端同步' : '本機體驗模式'}
+                  </span>
+                </>
+              )}
             </span>
           </div>
         </button>
@@ -2212,6 +2507,17 @@ const App: React.FC = () => {
             </kbd>
           </button>
 
+          {/* My Digital Card Quick QR Trigger */}
+          <button
+            type="button"
+            onClick={() => setShowMyCardModal(true)}
+            className="hidden md:flex h-9 px-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 hover:text-indigo-700 dark:hover:text-indigo-300 text-xs font-semibold items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+            title="出示我的無紙化數位電子名片 QR Code"
+          >
+            <Contact className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+            <span className="hidden xl:inline">我的名片</span>
+          </button>
+
           {/* Compact Help Center Popover (?) */}
           <div className="relative" ref={helpMenuRef}>
             <button
@@ -2274,6 +2580,17 @@ const App: React.FC = () => {
                   </kbd>
                 </button>
                 <div className="h-px bg-slate-100 dark:bg-slate-800 my-1" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowHelpMenu(false);
+                    setShowInsightsModal(true);
+                  }}
+                  className="w-full text-left px-3.5 py-2 text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/40 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <BarChart3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>人脈洞察與數據儀表板</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -2599,6 +2916,44 @@ const App: React.FC = () => {
                   </button>
                 </div>
 
+                {/* Personal Tools & Multi-Input */}
+                <div className="px-4 pt-2 pb-1 text-[11px] font-bold text-slate-400 tracking-wide">
+                  個人數位名片與多元建檔
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSettingsMenu(false);
+                    setShowMyCardModal(true);
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <Contact className="w-4 h-4 shrink-0" />
+                  <span>我的數位電子名片 QR</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSettingsMenu(false);
+                    setShowTextImportModal(true);
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>貼上 Email 簽名檔 / 文字建檔</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSettingsMenu(false);
+                    setShowInsightsModal(true);
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2.5 transition-colors cursor-pointer"
+                >
+                  <BarChart3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>人脈洞察與永續儀表板</span>
+                </button>
+
                 {/* Data Quality Maintenance */}
                 <div className="px-4 pt-2 pb-1 text-[11px] font-bold text-slate-400 tracking-wide">
                   資料品質維護
@@ -2774,6 +3129,8 @@ const App: React.FC = () => {
             onBatchReorganizeDualSide={handleBatchReorganizeDualSideCards}
             onLoadDemoCards={handleLoadDemoCards}
             onTriggerUpload={handleAddClick}
+            onOpenTextImport={() => setShowTextImportModal(true)}
+            onOpenInsights={() => setShowInsightsModal(true)}
             dualSideReorgProgress={dualSideReorgProgress}
             isExporting={isExporting}
             isAutoUprighting={isAutoUprighting}
@@ -3118,47 +3475,66 @@ const App: React.FC = () => {
               <div className="flex-1 relative overflow-hidden" id="detail-panel">
                 {viewMode === 'camera' && (
                   <div className="absolute inset-0 z-50 bg-slate-950">
-                    <CameraScanner
-                      onCapture={handleCameraCapture}
-                      onClose={() => {
-                        setCameraTarget('new_card');
-                        setViewMode(formData ? 'detail' : 'file');
-                      }}
-                      onPickFromAlbum={() => fileInputRef.current?.click()}
-                      isMobile={isMobile}
-                      allowBurstMode={cameraTarget === 'new_card'}
-                      modeLabel={
-                        cameraTarget === 'back_side'
-                          ? '請將名片反面置於框內拍攝'
-                          : '請將名片正面置於框內拍攝'
+                    <Suspense
+                      fallback={
+                        <div className="h-full w-full flex items-center justify-center text-white text-sm gap-2">
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          <span>載入相機掃描器...</span>
+                        </div>
                       }
-                    />
+                    >
+                      <CameraScanner
+                        onCapture={handleCameraCapture}
+                        onScanVCard={cameraTarget === 'new_card' ? handleScanQrVCard : undefined}
+                        onClose={() => {
+                          setCameraTarget('new_card');
+                          setViewMode(formData ? 'detail' : 'file');
+                        }}
+                        onPickFromAlbum={() => fileInputRef.current?.click()}
+                        isMobile={isMobile}
+                        allowBurstMode={cameraTarget === 'new_card'}
+                        modeLabel={
+                          cameraTarget === 'back_side'
+                            ? '請將名片反面置於框內拍攝'
+                            : '請將名片正面或電子名片 QR 置於框內'
+                        }
+                      />
+                    </Suspense>
                   </div>
                 )}
 
                 {viewMode === 'cropper' && cropperImage && (
-                  <CropperWorkspace
-                    cropperImage={cropperImage}
-                    cropRegions={cropRegions}
-                    setCropRegions={setCropRegions}
-                    isAiDetecting={isAiDetecting}
-                    isRenderingPdf={isRenderingPdf}
-                    pdfPageCount={pdfDoc?.numPages || 0}
-                    currentPdfPage={currentPdfPage}
-                    onChangePdfPage={(nextPage) => {
-                      if (pdfDoc) renderPdfPage(pdfDoc, nextPage);
-                    }}
-                    onRotateImage={handleRotateCropImage}
-                    onReDetect={() => {
-                      if (cropperImage) autoDetectInCropper(cropperImage.split(',')[1]);
-                    }}
-                    onCancel={() => {
-                      setViewMode(formData ? 'detail' : 'file');
-                      setCropperImage(null);
-                      setPdfDoc(null);
-                    }}
-                    onConfirmCrops={handleConfirmCrops}
-                  />
+                  <Suspense
+                    fallback={
+                      <div className="h-full w-full flex items-center justify-center text-slate-500 text-sm gap-2">
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        <span>載入裁切工作區...</span>
+                      </div>
+                    }
+                  >
+                    <CropperWorkspace
+                      cropperImage={cropperImage}
+                      cropRegions={cropRegions}
+                      setCropRegions={setCropRegions}
+                      isAiDetecting={isAiDetecting}
+                      isRenderingPdf={isRenderingPdf}
+                      pdfPageCount={pdfDoc?.numPages || 0}
+                      currentPdfPage={currentPdfPage}
+                      onChangePdfPage={(nextPage) => {
+                        if (pdfDoc) renderPdfPage(pdfDoc, nextPage);
+                      }}
+                      onRotateImage={handleRotateCropImage}
+                      onReDetect={() => {
+                        if (cropperImage) autoDetectInCropper(cropperImage.split(',')[1]);
+                      }}
+                      onCancel={() => {
+                        setViewMode(formData ? 'detail' : 'file');
+                        setCropperImage(null);
+                        setPdfDoc(null);
+                      }}
+                      onConfirmCrops={handleConfirmCrops}
+                    />
+                  </Suspense>
                 )}
 
                 {formData ? (
@@ -3195,14 +3571,14 @@ const App: React.FC = () => {
                         請從左側列表選擇聯絡人進行審閱編輯，或直接將名片圖片 (JPG, PNG)、多頁掃描 PDF 拖曳至此處自動擷取欄位。
                       </p>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                         <button
                           type="button"
                           onClick={handleAddClick}
-                          className="py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          className="py-2.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <Plus className="w-4 h-4" />
-                          <span>選擇檔案或 PDF</span>
+                          <span>檔案 / PDF</span>
                         </button>
                         <button
                           type="button"
@@ -3210,12 +3586,23 @@ const App: React.FC = () => {
                             setCameraTarget('new_card');
                             setViewMode('camera');
                           }}
-                          className="py-2.5 px-4 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          className="py-2.5 px-3 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <Camera className="w-4 h-4" />
-                          <span>開啟相機拍攝</span>
+                          <span>相機 / QR</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowTextImportModal(true)}
+                          className="py-2.5 px-3 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                          <span>簽名檔文字</span>
                         </button>
                       </div>
+                      <p className="mt-2.5 text-[11px] text-slate-400">
+                        提示：也可直接按 <kbd className="px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono">⌘V / Ctrl+V</kbd> 貼上剪貼簿中的名片截圖
+                      </p>
 
                       {cards.length === 0 && (
                         <button
@@ -3493,139 +3880,204 @@ const App: React.FC = () => {
         />
       )}
 
-      {/* Global ⌘K Spotlight Command Palette */}
-      <CommandPalette
-        isOpen={showCommandPalette}
-        onClose={() => setShowCommandPalette(false)}
-        cards={cards}
-        onSelectCard={(id) => {
-          selectCard(id);
-          setViewMode('detail');
-        }}
-        onSwitchView={async (mode) => {
-          await flushPendingSave();
-          setViewMode(mode === 'search' ? 'search' : formData ? 'detail' : 'file');
-        }}
-        onUpload={handleAddClick}
-        onOpenCamera={() => {
-          setCameraTarget('new_card');
-          setViewMode('camera');
-        }}
-        onOpenDuplicates={handleFindDuplicates}
-        onOpenQsReview={() => {
-          handleBindCompliantQsList();
-          setIsQsModalOpen(true);
-        }}
-        onOpenGuide={() => setShowUserGuideModal(true)}
-        onStartTour={handleStartInteractiveTour}
-        onOpenImpact={() => setShowImpactModal(true)}
-        theme={theme}
-        onCycleTheme={handleCycleTheme}
-        duplicateCount={duplicateAnalysis.totalDuplicateCount}
-      />
+      {/* Lazy-Loaded Modals, Drawers & AI Assistant */}
+      <Suspense fallback={null}>
+        {/* Global ⌘K Spotlight Command Palette */}
+        {showCommandPalette && (
+          <CommandPalette
+            isOpen={showCommandPalette}
+            onClose={() => setShowCommandPalette(false)}
+            cards={cards}
+            onSelectCard={(id) => {
+              selectCard(id);
+              setViewMode('detail');
+            }}
+            onSwitchView={async (mode) => {
+              await flushPendingSave();
+              setViewMode(mode === 'search' ? 'search' : formData ? 'detail' : 'file');
+            }}
+            onUpload={handleAddClick}
+            onOpenCamera={() => {
+              setCameraTarget('new_card');
+              setViewMode('camera');
+            }}
+            onOpenDuplicates={handleFindDuplicates}
+            onOpenQsReview={() => {
+              handleBindCompliantQsList();
+              setIsQsModalOpen(true);
+            }}
+            onOpenGuide={() => setShowUserGuideModal(true)}
+            onStartTour={handleStartInteractiveTour}
+            onOpenImpact={() => setShowImpactModal(true)}
+            onOpenTextImport={() => setShowTextImportModal(true)}
+            onOpenMyCard={() => setShowMyCardModal(true)}
+            onOpenInsights={() => setShowInsightsModal(true)}
+            theme={theme}
+            onCycleTheme={handleCycleTheme}
+            duplicateCount={duplicateAnalysis.totalDuplicateCount}
+          />
+        )}
 
-      {/* Onboarding Tour */}
-      {tourStepIndex >= 0 && (
-        <TourOverlay
-          stepIndex={tourStepIndex}
-          steps={tourSteps}
-          onNext={handleTourNext}
-          onPrev={handleTourPrev}
-          onSkip={handleTourSkip}
-          onOpenFullGuide={() => setShowUserGuideModal(true)}
+        {/* Onboarding Tour */}
+        {tourStepIndex >= 0 && (
+          <TourOverlay
+            stepIndex={tourStepIndex}
+            steps={tourSteps}
+            onNext={handleTourNext}
+            onPrev={handleTourPrev}
+            onSkip={handleTourSkip}
+            onOpenFullGuide={() => setShowUserGuideModal(true)}
+          />
+        )}
+
+        {/* User Guide & Tutorial Manual Modal */}
+        {showUserGuideModal && (
+          <UserGuideModal
+            isOpen={showUserGuideModal}
+            onClose={() => setShowUserGuideModal(false)}
+            onStartInteractiveTour={handleStartInteractiveTour}
+          />
+        )}
+
+        {/* Sustainability Impact & AI Disclosure Modal */}
+        {showImpactModal && (
+          <ThreeGoodImpactModal
+            isOpen={showImpactModal}
+            onClose={() => setShowImpactModal(false)}
+            cards={cards}
+            onLoadDemoCards={handleLoadDemoCards}
+          />
+        )}
+
+        {/* Text / Email Signature AI Import Modal */}
+        {showTextImportModal && (
+          <TextImportModal
+            isOpen={showTextImportModal}
+            onClose={() => setShowTextImportModal(false)}
+            onSaveNewCard={handleSaveManualOrQrCard}
+          />
+        )}
+
+        {/* My Paperless Digital Business Card Modal */}
+        {showMyCardModal && (
+          <MyDigitalCardModal
+            isOpen={showMyCardModal}
+            onClose={() => setShowMyCardModal(false)}
+            authUser={authUser}
+          />
+        )}
+
+        {/* Visual Network Insights & Sustainability Dashboard */}
+        {showInsightsModal && (
+          <InsightsDashboardModal
+            isOpen={showInsightsModal}
+            onClose={() => setShowInsightsModal(false)}
+            cards={cards}
+            onFilterByCountry={(ctry) => {
+              setSearchPageState((prev) => ({ ...prev, filterCountry: ctry }));
+              setViewMode('search');
+            }}
+            onFilterBySource={(src) => {
+              setSearchPageState((prev) => ({ ...prev, filterSource: src }));
+              setViewMode('search');
+            }}
+            onFilterByTag={(tag) => {
+              setSearchPageState((prev) => ({ ...prev, filterTag: tag }));
+              setViewMode('search');
+            }}
+          />
+        )}
+
+        {/* Duplicate Manager Modal */}
+        {showDuplicateManager && (
+          <DuplicateManagerModal
+            groups={duplicateAnalysis.groups}
+            onClose={() => setShowDuplicateManager(false)}
+            onAutoCleanAll={handleAutoDeduplicate}
+            onDeleteSingle={handleDeleteDuplicateSingle}
+            onBatchDelete={handleBatchDeleteDuplicateCards}
+            isProcessing={isDeduplicating}
+          />
+        )}
+
+        {/* Contact Completeness Review & Export Modal */}
+        {isQsModalOpen && (
+          <QsConfirmationModal
+            isOpen={isQsModalOpen}
+            onClose={() => setIsQsModalOpen(false)}
+            selectedCardIds={selectedCardIds}
+            allCards={cards}
+            onToggleCard={handleToggleCardSelect}
+            onSelectAll={() => handleSelectCategory('all')}
+            onBindCompliantList={handleBindCompliantQsList}
+            onAutoFixCategories={handleAutoFixQsCategories}
+            onDeselectAll={handleDeselectAll}
+            onUpdateCardCategory={handleQuickCategoryChange}
+            onStandardizeSelectedCountries={handleStandardizeSelectedCountries}
+            onExport={async (mode, selectedCards) => {
+              await handleExport(mode, selectedCards);
+            }}
+            isExporting={isExporting}
+            onOpenCardDetail={(id) => {
+              selectCard(id);
+              setViewMode('detail');
+              setIsQsModalOpen(false);
+            }}
+          />
+        )}
+
+        {/* QR Code Digital vCard Modal */}
+        {qrModalCard && (
+          <QrCodeModal card={qrModalCard} onClose={() => setQrModalCard(null)} />
+        )}
+
+        {/* Outreach Email Draft Slide-Over Drawer */}
+        {emailDrawerCard && (
+          <FollowUpEmailDrawer
+            card={emailDrawerCard}
+            onClose={() => setEmailDrawerCard(null)}
+            onEmailActed={handleEmailActed}
+          />
+        )}
+
+        {/* Keyboard Shortcuts Reference Modal */}
+        {showShortcutsModal && (
+          <KeyboardShortcutsModal
+            isOpen={showShortcutsModal}
+            onClose={() => setShowShortcutsModal(false)}
+            onOpenUserGuide={() => setShowUserGuideModal(true)}
+          />
+        )}
+
+        {/* Dual-Side Discrepancy / Conflict Decision Modal */}
+        {dualSideConflictQueue.length > 0 && (
+          <DualSideConflictModal
+            conflictQueue={dualSideConflictQueue}
+            onResolveCurrent={handleResolveDualSideConflict}
+            onSkipCurrent={() =>
+              setDualSideConflictQueue((prev) => (prev.length > 1 ? prev.slice(1) : []))
+            }
+            onCloseAll={() => setDualSideConflictQueue([])}
+            isSubmitting={isResolvingDualConflict}
+          />
+        )}
+
+        {/* Semantic Card Search Assistant */}
+        <ChatBox
+          cards={cards}
+          onJumpToCard={(cardId) => {
+            selectCard(cardId);
+            setViewMode('detail');
+          }}
+          externalSearchQuery={externalChatQuery}
+          onExternalSearchConsumed={() => setExternalChatQuery(null)}
+          onIntentDetected={handleChatIntentDetected}
+          hasBatchBar={selectedCardIds.size > 0}
+          isMobile={isMobile}
+          externalOpen={isChatOpen}
+          onExternalOpenChange={setIsChatOpen}
         />
-      )}
-
-      {/* User Guide & Tutorial Manual Modal */}
-      <UserGuideModal
-        isOpen={showUserGuideModal}
-        onClose={() => setShowUserGuideModal(false)}
-        onStartInteractiveTour={handleStartInteractiveTour}
-      />
-
-      {/* Sustainability Impact & AI Disclosure Modal */}
-      <ThreeGoodImpactModal
-        isOpen={showImpactModal}
-        onClose={() => setShowImpactModal(false)}
-        cards={cards}
-        onLoadDemoCards={handleLoadDemoCards}
-      />
-
-      {/* Duplicate Manager Modal */}
-      {showDuplicateManager && (
-        <DuplicateManagerModal
-          groups={duplicateAnalysis.groups}
-          onClose={() => setShowDuplicateManager(false)}
-          onAutoCleanAll={handleAutoDeduplicate}
-          onDeleteSingle={handleDeleteDuplicateSingle}
-          onBatchDelete={handleBatchDeleteDuplicateCards}
-          isProcessing={isDeduplicating}
-        />
-      )}
-
-      {/* Contact Completeness Review & Export Modal */}
-      <QsConfirmationModal
-        isOpen={isQsModalOpen}
-        onClose={() => setIsQsModalOpen(false)}
-        selectedCardIds={selectedCardIds}
-        allCards={cards}
-        onToggleCard={handleToggleCardSelect}
-        onSelectAll={() => handleSelectCategory('all')}
-        onBindCompliantList={handleBindCompliantQsList}
-        onAutoFixCategories={handleAutoFixQsCategories}
-        onDeselectAll={handleDeselectAll}
-        onUpdateCardCategory={handleQuickCategoryChange}
-        onStandardizeSelectedCountries={handleStandardizeSelectedCountries}
-        onExport={async (mode, selectedCards) => {
-          await handleExport(mode, selectedCards);
-        }}
-        isExporting={isExporting}
-        onOpenCardDetail={(id) => {
-          selectCard(id);
-          setViewMode('detail');
-          setIsQsModalOpen(false);
-        }}
-      />
-
-      {/* QR Code Digital vCard Modal */}
-      <QrCodeModal card={qrModalCard} onClose={() => setQrModalCard(null)} />
-
-      {/* Outreach Email Draft Slide-Over Drawer */}
-      <FollowUpEmailDrawer card={emailDrawerCard} onClose={() => setEmailDrawerCard(null)} />
-
-      {/* Keyboard Shortcuts Reference Modal */}
-      <KeyboardShortcutsModal
-        isOpen={showShortcutsModal}
-        onClose={() => setShowShortcutsModal(false)}
-        onOpenUserGuide={() => setShowUserGuideModal(true)}
-      />
-
-      {/* Dual-Side Discrepancy / Conflict Decision Modal */}
-      <DualSideConflictModal
-        conflictQueue={dualSideConflictQueue}
-        onResolveCurrent={handleResolveDualSideConflict}
-        onSkipCurrent={() =>
-          setDualSideConflictQueue((prev) => (prev.length > 1 ? prev.slice(1) : []))
-        }
-        onCloseAll={() => setDualSideConflictQueue([])}
-        isSubmitting={isResolvingDualConflict}
-      />
-
-      {/* Semantic Card Search Assistant */}
-      <ChatBox
-        cards={cards}
-        onJumpToCard={(cardId) => {
-          selectCard(cardId);
-          setViewMode('detail');
-        }}
-        externalSearchQuery={externalChatQuery}
-        onExternalSearchConsumed={() => setExternalChatQuery(null)}
-        onIntentDetected={handleChatIntentDetected}
-        hasBatchBar={selectedCardIds.size > 0}
-        isMobile={isMobile}
-        externalOpen={isChatOpen}
-        onExternalOpenChange={setIsChatOpen}
-      />
+      </Suspense>
     </div>
   );
 };

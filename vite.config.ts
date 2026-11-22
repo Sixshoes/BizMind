@@ -24,6 +24,15 @@ export default defineConfig(() => {
             if (id.includes('node_modules/react-dom') || id.includes('node_modules/react/')) {
               return 'vendor-react';
             }
+            if (id.includes('node_modules/firebase') || id.includes('node_modules/@firebase')) {
+              return 'vendor-firebase';
+            }
+            if (id.includes('node_modules/motion') || id.includes('node_modules/framer-motion')) {
+              return 'vendor-motion';
+            }
+            if (id.includes('node_modules/react-markdown') || id.includes('node_modules/remark') || id.includes('node_modules/mdast') || id.includes('node_modules/micromark')) {
+              return 'vendor-markdown';
+            }
             if (id.includes('node_modules/xlsx')) {
               return 'vendor-xlsx';
             }

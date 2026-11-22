@@ -11,10 +11,14 @@ import {
   RotateCcw,
   Layers,
   ImagePlus,
+  QrCode,
 } from 'lucide-react';
+import { BusinessCardData } from '../types';
+import { parseContactQrPayload } from '../utils/vcardParser';
 
 interface CameraScannerProps {
   onCapture: (base64: string, options?: { keepOpen?: boolean }) => void;
+  onScanVCard?: (parsed: Partial<BusinessCardData>) => void;
   onClose: () => void;
   onPickFromAlbum?: () => void;
   isMobile?: boolean;
@@ -24,6 +28,7 @@ interface CameraScannerProps {
 
 const CameraScanner: React.FC<CameraScannerProps> = ({
   onCapture,
+  onScanVCard,
   onClose,
   onPickFromAlbum,
   isMobile = false,
@@ -47,6 +52,7 @@ const CameraScanner: React.FC<CameraScannerProps> = ({
   const [previewB64, setPreviewB64] = useState<string | null>(null);
   const [flashTrigger, setFlashTrigger] = useState(0);
   const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
+  const [detectedQrContact, setDetectedQrContact] = useState<Partial<BusinessCardData> | null>(null);
 
   const stopTracks = () => {
     if (streamRef.current) {
@@ -160,6 +166,42 @@ const CameraScanner: React.FC<CameraScannerProps> = ({
     startCamera('environment');
     return () => stopTracks();
   }, []);
+
+  // Optional zero-AI live QR vCard / MeCard detection when supported by browser BarcodeDetector
+  useEffect(() => {
+    if (!isReady || previewB64 || !onScanVCard) return;
+    const DetectorCtor = (window as any).BarcodeDetector;
+    if (typeof DetectorCtor !== 'function') return;
+
+    let cancelled = false;
+    let detector: any = null;
+    try {
+      detector = new DetectorCtor({ formats: ['qr_code'] });
+    } catch {
+      return;
+    }
+
+    const interval = setInterval(async () => {
+      if (cancelled || !videoRef.current || videoRef.current.readyState < 2) return;
+      try {
+        const codes = await detector.detect(videoRef.current);
+        for (const code of codes || []) {
+          const parsed = parseContactQrPayload(code.rawValue || '');
+          if (parsed) {
+            setDetectedQrContact(parsed);
+            return;
+          }
+        }
+      } catch {
+        // ignore transient detection failures
+      }
+    }, 650);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isReady, previewB64, onScanVCard]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -421,6 +463,37 @@ const CameraScanner: React.FC<CameraScannerProps> = ({
                 : modeLabel}
             </div>
           </div>
+
+          {/* Detected vCard / MeCard QR Instant Import Banner */}
+          {detectedQrContact && onScanVCard && (
+            <div className="absolute top-16 inset-x-4 max-w-md mx-auto z-30 animate-fadeIn">
+              <div className="bg-emerald-600/95 backdrop-blur-md text-white rounded-2xl px-4 py-3 shadow-2xl border border-emerald-400/50 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <QrCode className="w-5 h-5 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold truncate">
+                      偵測到電子名片 QR：{`${detectedQrContact.lastName || ''}${detectedQrContact.firstName || ''}`.trim() || detectedQrContact.company}
+                    </div>
+                    <div className="text-[11px] text-emerald-100 truncate">
+                      {detectedQrContact.company || detectedQrContact.email || '免 AI 秒速建檔'}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const contact = detectedQrContact;
+                    setDetectedQrContact(null);
+                    stopTracks();
+                    onScanVCard(contact);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-white text-emerald-700 font-bold text-xs shrink-0 hover:bg-emerald-50 cursor-pointer"
+                >
+                  立即匯入
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Bottom Shutter Bar */}
           <div className="absolute bottom-7 inset-x-6 flex items-center justify-between max-w-md mx-auto z-20">

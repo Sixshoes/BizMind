@@ -16,6 +16,9 @@ import {
   Leaf,
   CornerDownLeft,
   X,
+  FileText,
+  QrCode,
+  BarChart3,
 } from 'lucide-react';
 import { BusinessCardData } from '../types';
 import { filterCards } from '../utils/cardFilters';
@@ -44,6 +47,9 @@ interface CommandPaletteProps {
   onOpenGuide: () => void;
   onStartTour: () => void;
   onOpenImpact: () => void;
+  onOpenTextImport?: () => void;
+  onOpenMyCard?: () => void;
+  onOpenInsights?: () => void;
   theme: ThemePreference;
   onCycleTheme: () => void;
   duplicateCount: number;
@@ -62,6 +68,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onOpenGuide,
   onStartTour,
   onOpenImpact,
+  onOpenTextImport,
+  onOpenMyCard,
+  onOpenInsights,
   theme,
   onCycleTheme,
   duplicateCount,
@@ -91,11 +100,47 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       {
         id: 'camera',
         label: '開啟相機拍攝名片',
-        hint: '支援展會連拍模式',
+        hint: '支援展會連拍與 QR 電子名片即時掃描',
         icon: <Camera className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />,
-        keywords: 'camera scan photo 拍照 掃描 相機',
+        keywords: 'camera scan photo qr 拍照 掃描 相機',
         onExecute: onOpenCamera,
       },
+      ...(onOpenTextImport
+        ? [
+            {
+              id: 'text-import',
+              label: '貼上 Email 簽名檔 / 文字建檔',
+              hint: '支援信件簽名、LINE 自介與 vCard 文字',
+              icon: <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />,
+              keywords: 'text signature email line paste vcard 簽名檔 文字 貼上',
+              onExecute: onOpenTextImport,
+            },
+          ]
+        : []),
+      ...(onOpenMyCard
+        ? [
+            {
+              id: 'my-card',
+              label: '出示「我的數位電子名片 QR」',
+              hint: '無紙化交換個人聯絡方式與 .vcf 分享',
+              icon: <QrCode className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />,
+              keywords: 'my card qr digital vcard 我的名片 電子名片 交換',
+              onExecute: onOpenMyCard,
+            },
+          ]
+        : []),
+      ...(onOpenInsights
+        ? [
+            {
+              id: 'insights',
+              label: '開啟「人脈洞察與減碳儀表板」',
+              hint: '視覺化統計國家分佈、展會成效與 CRM 跟進進度',
+              icon: <BarChart3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />,
+              keywords: 'insights dashboard chart stats analytics 統計 洞察 儀表板 報表',
+              onExecute: onOpenInsights,
+            },
+          ]
+        : []),
       {
         id: 'view-search',
         label: '切換至「名片資料庫」',
@@ -178,6 +223,9 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       onOpenGuide,
       onStartTour,
       onOpenImpact,
+      onOpenTextImport,
+      onOpenMyCard,
+      onOpenInsights,
     ]
   );
 

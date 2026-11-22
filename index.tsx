@@ -91,3 +91,11 @@ if (!rootElement) {
     }
   }
 }
+
+if (typeof window !== 'undefined' && import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      // Ignore SW registration errors in restricted browsers
+    });
+  });
+}

@@ -28,8 +28,21 @@ import {
   Trash2,
   CheckCircle2,
   GripVertical,
+  Mic,
+  Square,
+  CalendarPlus,
+  History,
+  ExternalLink,
+  Check,
+  SearchCheck,
 } from 'lucide-react';
-import { BusinessCardData } from '../types';
+import {
+  BusinessCardData,
+  FollowUpStatus,
+  FOLLOW_UP_STATUS_LABELS,
+  CardEnrichmentResult,
+  CardActivityItem,
+} from '../types';
 import PanZoomImage from './PanZoomImage';
 import EditableField from './EditableField';
 import { CardThumbnail } from './CardThumbnail';
@@ -38,8 +51,13 @@ import { normalizeCountry, STANDARD_COUNTRY_OPTIONS } from '../utils/countries';
 import { evaluateQsReadiness } from '../utils/qsValidation';
 import { compressImage } from '../utils/imageUtils';
 import { uploadImageAsset } from '../utils/firebase';
-import { extractBackCardInfo } from '../services/geminiService';
+import {
+  extractBackCardInfo,
+  transcribeVoiceNote,
+  enrichCardWithWebSearch,
+} from '../services/geminiService';
 import { applyDualSideMerge } from '../utils/dualSideCardUtils';
+import { downloadFollowUpIcs } from '../utils/icsExport';
 import { useToast } from './ToastProvider';
 
 const SPLIT_PCT_STORAGE_KEY = 'bizmind_detail_split_pct_v1';
@@ -83,6 +101,18 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
   const [newTagInput, setNewTagInput] = useState('');
   const backFileInputRef = useRef<HTMLInputElement>(null);
 
+  // AI Background Enrichment (Human-in-the-Loop)
+  const [isEnriching, setIsEnriching] = useState(false);
+  const [enrichmentPreview, setEnrichmentPreview] = useState<CardEnrichmentResult | null>(null);
+
+  // Voice Meeting Note Recorder
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [voiceSeconds, setVoiceSeconds] = useState(0);
+  const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Resizable Split Pane (desktop)
   const containerRef = useRef<HTMLDivElement>(null);
   const [splitPct, setSplitPct] = useState<number>(() => {
@@ -98,7 +128,211 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
 
   useEffect(() => {
     setActiveSide(card.backImageUrl ? 'split' : 'front');
+    setEnrichmentPreview(null);
   }, [card.id]);
+
+  useEffect(() => {
+    return () => {
+      if (voiceTimerRef.current) clearInterval(voiceTimerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try {
+          mediaRecorderRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
+
+  const appendActivity = (
+    base: BusinessCardData,
+    type: CardActivityItem['type'],
+    text: string
+  ): BusinessCardData => {
+    const entry: CardActivityItem = {
+      id: crypto.randomUUID(),
+      at: Date.now(),
+      type,
+      text,
+    };
+    const nextLog = [entry, ...(base.activityLog || [])].slice(0, 25);
+    return { ...base, activityLog: nextLog };
+  };
+
+  const handleEnrichCompany = async () => {
+    if (isEnriching) return;
+    setIsEnriching(true);
+    setEnrichmentPreview(null);
+    try {
+      const result = await enrichCardWithWebSearch(card);
+      setEnrichmentPreview(result);
+      addToast({ type: 'info', message: '已完成公開背景查證，請檢視並決定是否套用' });
+    } catch (err: any) {
+      addToast({ type: 'error', message: err.message || '背景查證失敗' });
+    } finally {
+      setIsEnriching(false);
+    }
+  };
+
+  const handleApplyEnrichment = async () => {
+    if (!enrichmentPreview) return;
+    let next: BusinessCardData = {
+      ...card,
+      summary: enrichmentPreview.companySummary || card.summary,
+      industry: card.industry || enrichmentPreview.industry || '',
+      website: card.website || enrichmentPreview.website || '',
+      country: card.country || enrichmentPreview.country || '',
+    };
+    next = appendActivity(next, 'enriched', '已套用 AI 聯網機構背景補完資料');
+    setEnrichmentPreview(null);
+    await onPersistImmediate(next);
+    addToast({ type: 'success', message: '已套用機構背景補完並自動儲存' });
+  };
+
+  const handleUpdateFollowUpStatus = async (status: FollowUpStatus) => {
+    const label = FOLLOW_UP_STATUS_LABELS[status].label;
+    const next = appendActivity({ ...card, followUpStatus: status }, 'status', `跟進狀態更新為「${label}」`);
+    await onPersistImmediate(next);
+  };
+
+  const handleSetFollowUpDate = async (dateStr: string) => {
+    if (!dateStr) {
+      await onPersistImmediate({ ...card, nextFollowUpAt: undefined });
+      return;
+    }
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const ts = new Date(y, (m || 1) - 1, d || 1, 9, 30, 0, 0).getTime();
+    await onPersistImmediate({ ...card, nextFollowUpAt: ts });
+    addToast({ type: 'success', message: `已排定跟進提醒日期：${dateStr}`, duration: 2200 });
+  };
+
+  const handleQuickFollowUpDays = async (days: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    d.setHours(9, 30, 0, 0);
+    await onPersistImmediate({ ...card, nextFollowUpAt: d.getTime() });
+    addToast({ type: 'success', message: `已排定 ${days} 天後跟進提醒`, duration: 2200 });
+  };
+
+  const handleToggleVoiceRecord = async () => {
+    if (isRecordingVoice) {
+      if (voiceTimerRef.current) {
+        clearInterval(voiceTimerRef.current);
+        voiceTimerRef.current = null;
+      }
+      setIsRecordingVoice(false);
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      addToast({ type: 'error', message: '目前瀏覽器不支援麥克風錄音功能' });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : 'audio/webm';
+      const recorder = new MediaRecorder(stream, { mimeType: preferredMime });
+      voiceChunksRef.current = [];
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) voiceChunksRef.current.push(ev.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const audioBlob = new Blob(voiceChunksRef.current, { type: preferredMime.split(';')[0] });
+        if (audioBlob.size < 400) {
+          addToast({ type: 'info', message: '錄音時間過短，已取消辨識' });
+          return;
+        }
+        setIsTranscribingVoice(true);
+        try {
+          const base64Audio = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const res = String(reader.result || '');
+              resolve(res.includes(',') ? res.split(',')[1] : res);
+            };
+            reader.onerror = () => reject(new Error('音訊讀取失敗'));
+            reader.readAsDataURL(audioBlob);
+          });
+
+          const voiceRes = await transcribeVoiceNote(
+            base64Audio,
+            preferredMime.split(';')[0],
+            card
+          );
+          const dateTag = new Date().toLocaleDateString('zh-TW');
+          const bulletBlock = voiceRes.summaryBullet
+            ? `[語音紀要 ${dateTag}]\n${voiceRes.summaryBullet}`
+            : '';
+          const nextNotes = [card.notes?.trim(), bulletBlock].filter(Boolean).join('\n\n');
+          const mergedTags = Array.from(
+            new Set([...(card.tags || []), ...(voiceRes.suggestedTags || [])])
+          );
+          let nextFollowUp = card.nextFollowUpAt;
+          if (voiceRes.suggestedFollowUpDays && voiceRes.suggestedFollowUpDays > 0) {
+            const d = new Date();
+            d.setDate(d.getDate() + voiceRes.suggestedFollowUpDays);
+            d.setHours(9, 30, 0, 0);
+            nextFollowUp = d.getTime();
+          }
+
+          let updated: BusinessCardData = {
+            ...card,
+            notes: nextNotes,
+            tags: mergedTags,
+            nextFollowUpAt: nextFollowUp,
+          };
+          updated = appendActivity(
+            updated,
+            'voice',
+            `已錄製並由 AI 整理語音會談紀要${
+              voiceRes.suggestedTags?.length
+                ? `（標籤：${voiceRes.suggestedTags.map((t) => `#${t}`).join(' ')}）`
+                : ''
+            }`
+          );
+          await onPersistImmediate(updated);
+          addToast({
+            type: 'success',
+            message: voiceRes.suggestedFollowUpDays
+              ? `語音紀要已存入備註，並自動排定 ${voiceRes.suggestedFollowUpDays} 天後跟進！`
+              : '語音會談紀要與建議標籤已自動寫入！',
+          });
+        } catch (err: any) {
+          addToast({ type: 'error', message: `語音紀要解析失敗：${err.message || '請稍後再試'}` });
+        } finally {
+          setIsTranscribingVoice(false);
+          setVoiceSeconds(0);
+        }
+      };
+
+      recorder.start();
+      setVoiceSeconds(0);
+      setIsRecordingVoice(true);
+      voiceTimerRef.current = setInterval(() => {
+        setVoiceSeconds((s) => {
+          if (s >= 59) {
+            mediaRecorderRef.current?.stop();
+            setIsRecordingVoice(false);
+            if (voiceTimerRef.current) clearInterval(voiceTimerRef.current);
+            return 60;
+          }
+          return s + 1;
+        });
+      }, 1000);
+    } catch {
+      addToast({ type: 'error', message: '無法取得麥克風權限，請於瀏覽器允許麥克風存取' });
+    }
+  };
 
   useEffect(() => {
     if (!isResizingSplit) return;
@@ -213,11 +447,13 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
       const dataUri = `data:image/jpeg;base64,${rawBase64}`;
       let backImageUrl = dataUri;
       let backImageId: string | undefined = undefined;
+      let backImagePath: string | undefined = undefined;
 
       try {
-        const uploaded = await uploadImageAsset(dataUri, `${card.id}_back`);
+        const uploaded = await uploadImageAsset(dataUri, `${card.id}_back`, 'back');
         backImageUrl = uploaded.downloadUrl;
         backImageId = uploaded.imageId;
+        backImagePath = uploaded.storagePath;
       } catch (uploadErr) {
         console.warn('Back image cloud upload fallback to local base64:', uploadErr);
       }
@@ -225,6 +461,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
       const withBackImage: BusinessCardData = {
         ...card,
         backImageUrl,
+        backImagePath,
         backImageId,
         backRotation: 0,
       };
@@ -281,6 +518,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
     const updated: BusinessCardData = {
       ...card,
       backImageUrl: undefined,
+      backImagePath: undefined,
       backImageId: undefined,
       backRotation: 0,
     };
@@ -845,9 +1083,93 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
 
           {/* Section 3: Identity & Institution */}
           <section className="p-5 rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-5 shadow-2xs">
-            <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100 pb-2.5 border-b border-slate-100 dark:border-slate-800">
-              基本身分與任職機構資訊
-            </h3>
+            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100 dark:border-slate-800 flex-wrap">
+              <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
+                基本身分與任職機構資訊
+              </h3>
+              <button
+                type="button"
+                disabled={isEnriching || (!card.company && !card.website && !card.email)}
+                onClick={handleEnrichCompany}
+                className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800 disabled:opacity-45 flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="透過 Google 搜尋補完此機構簡介、產業與官方網站（需您確認後才套用）"
+              >
+                {isEnriching ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <SearchCheck className="w-3.5 h-3.5" />
+                )}
+                <span>{isEnriching ? '聯網查證中...' : 'AI 補完機構背景'}</span>
+              </button>
+            </div>
+
+            {/* Human-in-the-Loop Enrichment Confirmation Banner */}
+            {enrichmentPreview && (
+              <div className="p-4 rounded-xl bg-indigo-50/75 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 space-y-2.5 animate-fadeIn">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-indigo-800 dark:text-indigo-200 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    AI 機構背景查證建議（確認後套用）
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setEnrichmentPreview(null)}
+                      className="px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-white/70 dark:hover:bg-slate-800 cursor-pointer"
+                    >
+                      略過
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleApplyEnrichment}
+                      className="px-3 py-1 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-1 cursor-pointer"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>套用補完</span>
+                    </button>
+                  </div>
+                </div>
+                {enrichmentPreview.companySummary && (
+                  <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed">
+                    {enrichmentPreview.companySummary}
+                  </p>
+                )}
+                <div className="flex flex-wrap gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                  {enrichmentPreview.industry && (
+                    <span className="px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-indigo-200/70 dark:border-indigo-800">
+                      產業：{enrichmentPreview.industry}
+                    </span>
+                  )}
+                  {enrichmentPreview.website && (
+                    <span className="px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-indigo-200/70 dark:border-indigo-800 font-mono">
+                      官網：{enrichmentPreview.website}
+                    </span>
+                  )}
+                  {enrichmentPreview.country && (
+                    <span className="px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-indigo-200/70 dark:border-indigo-800">
+                      國家：{enrichmentPreview.country}
+                    </span>
+                  )}
+                </div>
+                {enrichmentPreview.sources.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <span className="text-[11px] text-slate-500">查證來源：</span>
+                    {enrichmentPreview.sources.map((src, idx) => (
+                      <a
+                        key={idx}
+                        href={src.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white dark:bg-slate-900 text-[11px] font-medium text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800 hover:underline"
+                      >
+                        <span className="truncate max-w-[160px]">{src.title}</span>
+                        <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="grid grid-cols-12 gap-x-5 gap-y-5 items-start">
               <div className="col-span-12">
@@ -880,6 +1202,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
                   onChange={(v) => updateField('lastName', v)}
                   isMissing={!missingFlags.hasName}
                   missingHint="缺少聯絡人姓名"
+                  confidence={card.confidence?.name}
                 />
               </div>
               <div className="col-span-12 sm:col-span-5">
@@ -889,6 +1212,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
                   value={card.firstName}
                   onChange={(v) => updateField('firstName', v)}
                   isMissing={!missingFlags.hasName}
+                  confidence={card.confidence?.name}
                 />
               </div>
 
@@ -903,6 +1227,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
                   icon={<Briefcase className="w-4 h-4" />}
                   isMissing={!missingFlags.hasTitle}
                   missingHint="建議補齊職稱"
+                  confidence={card.confidence?.title}
                 />
               </div>
               <div className="col-span-12 md:col-span-6">
@@ -916,6 +1241,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
                   icon={<Building2 className="w-4 h-4" />}
                   isMissing={!missingFlags.hasCompany}
                   missingHint="建議補齊任職機構名稱"
+                  confidence={card.confidence?.company}
                 />
               </div>
 
@@ -991,6 +1317,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
                   onEmailAction={onOpenEmailDrawer ? () => onOpenEmailDrawer(card) : undefined}
                   isMissing={!missingFlags.hasEmail}
                   missingHint="缺少有效 Email"
+                  confidence={card.confidence?.email}
                 />
               </div>
               <div className="col-span-12 md:col-span-6">
@@ -1012,6 +1339,7 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
                   onChange={(v) => updateField('phone', v)}
                   icon={<Phone className="w-4 h-4" />}
                   actionType="phone"
+                  confidence={card.confidence?.phone}
                 />
               </div>
               <div className="col-span-12 md:col-span-6">
@@ -1059,11 +1387,41 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
             </div>
           </section>
 
-          {/* Section 5: Classification Basis & Internal Notes */}
+          {/* Section 5: Classification Basis, Voice Note & Internal Notes */}
           <section className="p-5 rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-5 shadow-2xs">
-            <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100 pb-2.5 border-b border-slate-100 dark:border-slate-800">
-              分類判定依據與會談備註
-            </h3>
+            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100 dark:border-slate-800 flex-wrap">
+              <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
+                分類判定依據與會談備註
+              </h3>
+              <button
+                type="button"
+                disabled={isTranscribingVoice}
+                onClick={handleToggleVoiceRecord}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition-colors cursor-pointer ${
+                  isRecordingVoice
+                    ? 'bg-rose-600 text-white border-rose-600 animate-pulse'
+                    : 'bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800'
+                }`}
+                title="口述會談重點，AI 自動整理為條列備註、建議標籤與跟進排程（最長 60 秒）"
+              >
+                {isTranscribingVoice ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>AI 整理語音紀要中...</span>
+                  </>
+                ) : isRecordingVoice ? (
+                  <>
+                    <Square className="w-3 h-3 fill-current" />
+                    <span className="tabular-nums">停止錄音 ({voiceSeconds}s)</span>
+                  </>
+                ) : (
+                  <>
+                    <Mic className="w-3.5 h-3.5" />
+                    <span>語音會談紀要</span>
+                  </>
+                )}
+              </button>
+            </div>
 
             <div className="grid grid-cols-12 gap-x-5 gap-y-5 items-start">
               <div className="col-span-12 md:col-span-6">
@@ -1084,10 +1442,115 @@ export const CardDetailPanel: React.FC<CardDetailPanelProps> = ({
                   value={card.notes}
                   onChange={(v) => updateField('notes', v)}
                   isTextArea
-                  placeholder="記錄會談重點、合作意向或反面補充說明..."
+                  placeholder="記錄會談重點、合作意向或點擊右上方「語音會談紀要」口述..."
                 />
               </div>
             </div>
+          </section>
+
+          {/* Section 6: Personal CRM Follow-Up, Calendar Reminder & Activity Log */}
+          <section className="p-5 rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-4 shadow-2xs">
+            <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100 pb-2.5 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+              <History className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              <span>輕量 CRM 跟進排程與互動紀錄</span>
+            </h3>
+
+            {/* Follow-Up Status Pills */}
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                目前關係進度
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {(['new', 'emailed', 'in_progress', 'partner'] as FollowUpStatus[]).map((st) => {
+                  const active = (card.followUpStatus || 'new') === st;
+                  const meta = FOLLOW_UP_STATUS_LABELS[st];
+                  return (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => handleUpdateFollowUpStatus(st)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                        active
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                          : `${meta.colorCls} hover:opacity-85`
+                      }`}
+                    >
+                      {meta.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Next Follow-Up Date + .ics Calendar Export */}
+            <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+                下次跟進日期：
+              </label>
+              <input
+                type="date"
+                value={
+                  card.nextFollowUpAt
+                    ? new Date(card.nextFollowUpAt - new Date().getTimezoneOffset() * 60000)
+                        .toISOString()
+                        .slice(0, 10)
+                    : ''
+                }
+                onChange={(e) => handleSetFollowUpDate(e.target.value)}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 focus:border-indigo-500 focus:outline-none"
+              />
+              <div className="flex items-center gap-1">
+                {[
+                  { label: '+3天', days: 3 },
+                  { label: '+7天', days: 7 },
+                  { label: '+14天', days: 14 },
+                ].map((opt) => (
+                  <button
+                    key={opt.days}
+                    type="button"
+                    onClick={() => handleQuickFollowUpDays(opt.days)}
+                    className="px-2 py-1 rounded-md text-[11px] font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 text-slate-700 dark:text-slate-200 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors cursor-pointer"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {card.nextFollowUpAt && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    downloadFollowUpIcs(card, card.nextFollowUpAt!);
+                    addToast({ type: 'success', message: '已下載行事曆提醒檔 (.ics)' });
+                  }}
+                  className="ml-auto px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/50 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <CalendarPlus className="w-3.5 h-3.5" />
+                  <span>加入行事曆 (.ics)</span>
+                </button>
+              )}
+            </div>
+
+            {/* Recent Activity Timeline */}
+            {card.activityLog && card.activityLog.length > 0 && (
+              <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
+                <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                  最近互動歷程
+                </div>
+                <div className="space-y-1.5 max-h-36 overflow-y-auto custom-scrollbar">
+                  {card.activityLog.slice(0, 6).map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-start justify-between gap-3 text-xs py-1 px-2.5 rounded-lg bg-slate-50/80 dark:bg-slate-800/40"
+                    >
+                      <span className="text-slate-700 dark:text-slate-200">{item.text}</span>
+                      <span className="text-[11px] text-slate-400 tabular-nums shrink-0">
+                        {new Date(item.at).toLocaleDateString('zh-TW')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         </div>
       </div>
